@@ -35,22 +35,23 @@ def fill_combobox(field):
     """
     Fill a combobox/autocomplete widget.
 
-    Strategy:
-    1. Click to focus the field
-    2. Type the value
-    3. Wait 1.0s for suggestions to appear (critical — 500ms is too short)
+    Strategy (type-enter-select):
+    1. Input the value directly into the field (works through shadow DOM)
+    2. Press Enter to trigger search/filter
+    3. Wait 1.0s for filtered options to appear
     4. Find and click matching option via JS (traverses shadow DOM)
-    5. Fall back to Enter if no option found
+       - Works for multi-level dropdowns: Enter filters across all layers
+    5. Fall back to pressing Enter again if no option visible yet
     """
     idx = field.get("element_idx")
     value = field["answer"]
     if idx is None:
         return "manual_required", None
 
-    browser.click(idx)
+    browser.input(idx, value)   # fill shadow DOM input directly
     browser.wait(0.4)
-    browser.type(value)
-    browser.wait(1.0)  # Critical: wait for suggestions to load
+    browser.keys('Enter')       # trigger filter/search
+    browser.wait(1.0)           # wait for filtered options to load
 
     page = get_page()
     js_value = json.dumps(value.lower())
@@ -74,7 +75,7 @@ def fill_combobox(field):
 """))
 
     if result is None:
-        browser.keys('Enter')  # fallback
+        browser.keys('Enter')  # fallback: Enter may have already selected top match
 
     browser.wait(0.3)
     return "success", None

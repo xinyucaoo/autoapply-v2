@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 
 class InteractionStep(BaseModel):
-    action: Literal["click", "type", "keys", "wait", "select", "eval", "scroll"]
+    action: Literal["click", "type", "input", "keys", "wait", "select", "eval", "scroll"]
     target: str                 # "{idx}" for element index, key name, or JS expression
     value: str | None = None    # Text to type, key to press, JS to eval, etc.
     wait_ms: int = 300          # Pause after this step (ms)

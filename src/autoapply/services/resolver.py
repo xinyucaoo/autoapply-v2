@@ -168,6 +168,8 @@ CANONICAL_MAP: dict[str, str] = {
     # EEO / demographics
     "gender": "eeo.gender",
     "gender identity": "eeo.gender",
+    "what is your gender?": "eeo.gender",
+    "what is your gender": "eeo.gender",
     "sex": "eeo.gender",
     "race": "eeo.race_ethnicity",
     "ethnicity": "eeo.race_ethnicity",

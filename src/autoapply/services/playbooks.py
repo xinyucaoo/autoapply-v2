@@ -58,15 +58,16 @@ def lookup_playbook(ats: str | None, widget_type: str) -> InteractionRecipe | No
 # ---------------------------------------------------------------------------
 
 # Workday combo-box (state, country, degree, field-of-study, "how did you hear", etc.)
-# Pattern: click to open → type to filter → wait → Enter to select top match
+# Pattern: input value → Enter to trigger filter/search → click matching option from results
+# Works for multi-level dropdowns: Enter filters across all layers, no need to navigate tree manually
 _register("workday", "combobox", InteractionRecipe(
     widget_type="combobox",
     ats_platform="workday",
-    description="Click to open combo box, type to filter options, press Enter to select",
+    description="Input value directly, press Enter to trigger filter, click matching option from results",
     steps=[
-        InteractionStep(action="click", target="{idx}", wait_ms=300, note="Open combo box"),
-        InteractionStep(action="type", target="{idx}", value="{answer}", wait_ms=500, note="Type to filter options"),
-        InteractionStep(action="keys", target="Enter", wait_ms=500, note="Select filtered match"),
+        InteractionStep(action="input", target="{idx}", value="{answer}", wait_ms=400, note="Type value directly into field"),
+        InteractionStep(action="keys", target="Enter", wait_ms=1000, note="Trigger filter/search — options appear after Enter"),
+        InteractionStep(action="click", target="{matching_option_idx}", wait_ms=300, note="Click the matching option from state"),
     ],
 ))
 
