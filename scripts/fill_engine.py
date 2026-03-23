@@ -81,6 +81,65 @@ def fill_combobox(field):
     return "success", None
 
 
+def fill_shadow_text(field):
+    """
+    Fill a text input in shadow DOM (e.g. Workday phone/tel) with React event dispatch.
+
+    browser.input() sets the raw DOM value but bypasses React's synthetic event system,
+    so the value appears in the DOM but React's internal state stays empty and the field
+    clears on submit. This function also dispatches input+change events via JS so React
+    picks up the new value.
+    """
+    idx = field.get("element_idx")
+    value = field["answer"]
+    element_id = field.get("element_id")
+
+    if idx is None:
+        return "manual_required", None
+
+    browser.input(idx, value)
+    browser.wait(0.2)
+
+    page = get_page()
+    js_value = json.dumps(value)
+    js_id = json.dumps(element_id or "")
+
+    browser._run(page.evaluate(f"""
+() => {{
+    const val = {js_value};
+    const elemId = {js_id};
+    function findAndDispatch(root) {{
+        let el = null;
+        if (elemId) {{
+            el = root.getElementById ? root.getElementById(elemId) : root.querySelector('#' + elemId);
+        }}
+        if (!el) {{
+            el = root.querySelector('input[type=tel], input[type=phone]');
+        }}
+        if (el) {{
+            // Use React's native setter so React's vdom sees the change
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+            if (setter) setter.set.call(el, val);
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            return 'dispatched: ' + (el.id || el.name || 'unknown');
+        }}
+        for (const child of root.querySelectorAll('*')) {{
+            if (child.shadowRoot) {{
+                const r = findAndDispatch(child.shadowRoot);
+                if (r) return r;
+            }}
+        }}
+        return null;
+    }}
+    return findAndDispatch(document);
+}}
+"""))
+
+    browser.wait(0.15)
+    return "success", None
+
+
 def fill_native_select(field):
     """Fill a native <select> or custom listbox dropdown."""
     idx = field.get("element_idx")
@@ -296,6 +355,8 @@ FILL_STRATEGIES = {
     "text": fill_text,
     "textarea": fill_text,
     "email": fill_text,
+    "shadow_text": fill_shadow_text,
+    "tel": fill_shadow_text,
     "combobox": fill_combobox,
     "autocomplete": fill_combobox,
     "select": fill_native_select,

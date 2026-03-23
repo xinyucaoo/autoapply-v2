@@ -100,6 +100,28 @@ _register("workday", "date_segmented", InteractionRecipe(
     ],
 ))
 
+# Workday phone/tel input (shadow DOM, React-controlled)
+# browser.input() sets the raw DOM value but doesn't trigger React's synthetic events,
+# so the value doesn't persist on submit. fill_shadow_text dispatches input+change events via JS.
+_register("workday", "tel", InteractionRecipe(
+    widget_type="shadow_text",
+    ats_platform="workday",
+    description="Set value via input then dispatch React input+change events through shadow DOM",
+    steps=[
+        InteractionStep(action="input", target="{idx}", value="{answer}", wait_ms=200, note="Set raw value"),
+        InteractionStep(action="eval", target="dispatch React events via JS findInShadow by element_id", wait_ms=150, note="Fire input+change so React state updates"),
+    ],
+))
+_register("workday", "phone", InteractionRecipe(
+    widget_type="shadow_text",
+    ats_platform="workday",
+    description="Alias of tel — same shadow DOM React event dispatch strategy",
+    steps=[
+        InteractionStep(action="input", target="{idx}", value="{answer}", wait_ms=200, note="Set raw value"),
+        InteractionStep(action="eval", target="dispatch React events via JS findInShadow by element_id", wait_ms=150, note="Fire input+change so React state updates"),
+    ],
+))
+
 # Generic standard HTML <select> element
 _register("generic", "select", InteractionRecipe(
     widget_type="select",

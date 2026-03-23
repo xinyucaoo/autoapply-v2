@@ -35,19 +35,31 @@ Note the company name and job title. If profile is empty or missing, stop and te
 ## Step 2: Open the Job Page
 
 ```bash
-browser-use --headed open "<url>"
+uvx browser-use --headed open "<url>"
+```
+
+Import saved session cookies if they exist (silently skip if not):
+
+```bash
+[ -f ~/.autoapply/sessions/<ats>.json ] && uvx browser-use --headed cookies import ~/.autoapply/sessions/<ats>.json
+```
+
+Then reload to apply cookies:
+
+```bash
+uvx browser-use --headed eval "window.location.reload()"
 ```
 
 Get state (not screenshot) to find the Apply button:
 
 ```bash
-browser-use state
+uvx browser-use state
 ```
 
 Click Apply and navigate to the application form:
 
 ```bash
-browser-use click <index>
+uvx browser-use click <index>
 ```
 
 ---
@@ -66,6 +78,17 @@ Read the output and identify:
 - All form fields (labels, element IDs, widget types)
 - Which fields are required (`required=true`)
 - The Save/Continue button index
+- Any **expandable sections** — buttons or links like "Add Work Experience", "Add Education", "+ Add", "Add another" etc.
+
+**If expandable sections exist, click them all before resolving:**
+
+```bash
+uvx browser-use click <add_work_experience_idx>
+# repeat for each "Add" button on the page
+uvx browser-use state > /tmp/page_state.txt && cat /tmp/page_state.txt
+```
+
+Re-read state after expanding so the sub-fields (Company, Title, Start Date, etc.) are visible before resolve-batch runs.
 
 ### 3B: Resolve all fields
 
@@ -154,7 +177,7 @@ Wait for "yes" before clicking Submit.
 ## Step 5: Submit
 
 ```bash
-browser-use click <submit_button_index>
+uvx browser-use click <submit_button_index>
 ```
 
 Wait for confirmation page. Take a screenshot to confirm success.
@@ -185,6 +208,7 @@ python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone
 
 ## Operational Tips
 
+- **Never take screenshots during form filling** — always use `uvx browser-use state` for debugging. Screenshots are only for post-submit confirmation (Step 5).
 - **Always invoke browser-use as `uvx browser-use`** (it's a Python tool, not npm). Never use `browser-use` or `npx browser-use`.
 - **Always use `--headed`** so the user can see the browser in real time.
 - **Batch is the default** — only fall back to individual commands for tricky fields that fail.
