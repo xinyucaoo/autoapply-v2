@@ -28,7 +28,7 @@ DEFAULT_POLICIES: dict[str, str] = {
     "documents": "autofill",
     "preferences.remote_preference": "autofill",
     "preferences.years_of_experience": "autofill",
-    "eeo": "suggest_only",
+    "eeo": "autofill",
     "cover_letter": "suggest_only",
     "preferences.relocation_willing": "suggest_only",
     "preferences.desired_start_date": "always_prompt",
@@ -274,6 +274,7 @@ class ResolveResult:
     confidence: str | None  # "high", "medium", None
     policy: str             # "autofill", "suggest_only", "always_prompt", "never_store"
     suggestion: str | None  # Human-readable suggestion text
+    interaction_recipe: dict | None = None  # Serialized InteractionRecipe, if known
 
 
 def resolve_batch(
@@ -281,6 +282,7 @@ def resolve_batch(
     company: str | None = None,
     profile: Profile | None = None,
     history: ApplicationHistory | None = None,
+    ats_platform: str | None = None,
 ) -> list[dict]:
     """
     Resolve multiple form fields in a single call.
@@ -293,10 +295,11 @@ def resolve_batch(
         company: company name for scoped history lookup
         profile: pre-loaded Profile (skips disk load; useful in tests)
         history: pre-loaded ApplicationHistory (skips disk load; useful in tests)
+        ats_platform: ATS identifier ("workday", "greenhouse", etc.) for playbook lookup
 
     Returns:
         list of dicts with keys: label, answer, source, profile_path,
-        confidence, policy, suggestion
+        confidence, policy, suggestion, interaction_recipe
     """
     from autoapply.services.profile_store import load_profile
     from autoapply.services.history_store import load_history
@@ -318,6 +321,7 @@ def resolve_batch(
             company=company,
             profile=profile,
             history=history,
+            ats_platform=ats_platform,
         )
         results.append({
             "label": label,
@@ -327,6 +331,7 @@ def resolve_batch(
             "confidence": result.confidence,
             "policy": result.policy,
             "suggestion": result.suggestion,
+            "interaction_recipe": result.interaction_recipe,
         })
     return results
 
@@ -338,6 +343,7 @@ def resolve(
     company: str | None = None,
     profile: Profile | None = None,
     history: ApplicationHistory | None = None,
+    ats_platform: str | None = None,
 ) -> ResolveResult:
     """
     Resolve a form field label to an answer.
@@ -352,7 +358,16 @@ def resolve(
     if history is None:
         history = load_history()
 
+    from autoapply.services.playbooks import lookup_playbook
+
     normalized = _normalize(label)
+
+    def _recipe(qa_pair=None) -> dict | None:
+        """Return a serialized recipe: prefer stored history recipe, fall back to playbook."""
+        if qa_pair is not None and qa_pair.interaction_recipe is not None:
+            return qa_pair.interaction_recipe.model_dump()
+        playbook = lookup_playbook(ats_platform, field_type)
+        return playbook.model_dump() if playbook else None
 
     # Step 1 & 2: Canonical + alias mapping
     profile_path = CANONICAL_MAP.get(normalized)
@@ -374,6 +389,7 @@ def resolve(
                 confidence="high",
                 policy=policy,
                 suggestion=suggestion if policy != "autofill" else None,
+                interaction_recipe=_recipe(),
             )
 
     # Step 3: Custom Q&A in profile
@@ -387,6 +403,7 @@ def resolve(
                 confidence="high",
                 policy=policy,
                 suggestion=f"{qa.answer} (from custom Q&A)",
+                interaction_recipe=_recipe(),
             )
 
     # Step 4: History lookup
@@ -399,6 +416,7 @@ def resolve(
             confidence="medium",
             policy="suggest_only",  # History matches are always suggestions
             suggestion=f"{qa_match.answer} (from previous application)",
+            interaction_recipe=_recipe(qa_match),
         )
 
     # No match
@@ -409,4 +427,5 @@ def resolve(
         confidence=None,
         policy="ask_user",
         suggestion=None,
+        interaction_recipe=_recipe(),
     )

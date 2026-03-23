@@ -43,7 +43,9 @@ def set_value(profile: Profile, dotpath: str, value) -> Profile:
     obj = data
     for part in parts[:-1]:
         if isinstance(obj, dict):
-            obj = obj.setdefault(part, {})
+            if obj.get(part) is None:
+                obj[part] = {}
+            obj = obj[part]
         elif isinstance(obj, list):
             obj = obj[int(part)]
     last = parts[-1]

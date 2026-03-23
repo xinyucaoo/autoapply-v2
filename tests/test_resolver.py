@@ -217,28 +217,27 @@ def test_resolve_full_name_empty_profile():
 # Policy enforcement — suggest_only (EEO)
 # ---------------------------------------------------------------------------
 
-def test_resolve_gender_policy_suggest_only(sample_profile):
+def test_resolve_gender_policy_autofill(sample_profile):
     r = resolve("gender", profile=sample_profile, history=empty_history())
     assert r.answer == "Female"
-    assert r.policy == "suggest_only"
-    assert r.suggestion is not None
-    assert "Female" in r.suggestion
+    assert r.policy == "autofill"
+    assert r.suggestion is None
 
 
-def test_resolve_race_ethnicity_policy_suggest_only(sample_profile):
+def test_resolve_race_ethnicity_policy_autofill(sample_profile):
     r = resolve("race ethnicity", profile=sample_profile, history=empty_history())
-    assert r.policy == "suggest_only"
+    assert r.policy == "autofill"
     assert r.answer == "Asian"
 
 
-def test_resolve_veteran_status_policy_suggest_only(sample_profile):
+def test_resolve_veteran_status_policy_autofill(sample_profile):
     r = resolve("veteran status", profile=sample_profile, history=empty_history())
-    assert r.policy == "suggest_only"
+    assert r.policy == "autofill"
 
 
-def test_resolve_disability_status_policy_suggest_only(sample_profile):
+def test_resolve_disability_status_policy_autofill(sample_profile):
     r = resolve("disability status", profile=sample_profile, history=empty_history())
-    assert r.policy == "suggest_only"
+    assert r.policy == "autofill"
 
 
 def test_resolve_cover_letter_policy_suggest_only():
@@ -470,7 +469,7 @@ def test_resolve_batch_returns_all_fields(sample_profile):
     assert results[1]["label"] == "Email"
     assert results[1]["answer"] == "jane@example.com"
     assert results[2]["label"] == "Gender"
-    assert results[2]["policy"] == "suggest_only"
+    assert results[2]["policy"] == "autofill"
 
 
 def test_resolve_batch_preserves_label(sample_profile):
@@ -505,4 +504,112 @@ def test_resolve_batch_mixed_policies(sample_profile):
     ]
     results = resolve_batch(fields, profile=sample_profile, history=empty_history())
     policies = [r["policy"] for r in results]
-    assert policies == ["autofill", "suggest_only", "always_prompt", "ask_user"]
+    assert policies == ["autofill", "autofill", "always_prompt", "ask_user"]
+
+
+# ---------------------------------------------------------------------------
+# Interaction recipe propagation
+# ---------------------------------------------------------------------------
+
+def test_resolve_returns_playbook_recipe_for_combobox(sample_profile):
+    """resolve() with ats_platform + combobox field_type returns a recipe."""
+    r = resolve(
+        "state",
+        field_type="combobox",
+        ats_platform="workday",
+        profile=sample_profile,
+        history=empty_history(),
+    )
+    assert r.answer == "CA"
+    assert r.interaction_recipe is not None
+    assert r.interaction_recipe["widget_type"] == "combobox"
+    assert r.interaction_recipe["ats_platform"] == "workday"
+    assert len(r.interaction_recipe["steps"]) >= 3
+
+
+def test_resolve_no_recipe_for_plain_text(sample_profile):
+    """Plain text fields with no ATS specified return no recipe."""
+    r = resolve(
+        "first name",
+        field_type="text",
+        ats_platform=None,
+        profile=sample_profile,
+        history=empty_history(),
+    )
+    assert r.answer == "Jane"
+    assert r.interaction_recipe is None
+
+
+def test_resolve_history_recipe_takes_precedence(sample_profile):
+    """When a history QAPair has a stored recipe, it is used over the playbook."""
+    from autoapply.models.history import (
+        ApplicationHistory, ApplicationRecord, QAPair,
+        InteractionRecipe, InteractionStep,
+    )
+    custom_recipe = InteractionRecipe(
+        widget_type="combobox",
+        ats_platform="workday",
+        description="Custom learned recipe",
+        steps=[
+            InteractionStep(action="click", target="{idx}", wait_ms=100),
+            InteractionStep(action="type", target="{idx}", value="{answer}", wait_ms=200),
+        ],
+    )
+    history = ApplicationHistory(applications=[
+        ApplicationRecord(
+            id="test-001",
+            url="https://example.wd5.myworkdayjobs.com/job/1",
+            company="TestCo",
+            job_title="Engineer",
+            applied_at="2026-01-01T00:00:00+00:00",
+            status="submitted",
+            qa_pairs=[
+                QAPair(
+                    field_label="How did you hear about us?",
+                    field_type="combobox",
+                    answer="LinkedIn",
+                    source="user",
+                    user_verified=True,
+                    interaction_recipe=custom_recipe,
+                )
+            ],
+        )
+    ])
+    r = resolve(
+        "How did you hear about us?",
+        field_type="combobox",
+        ats_platform="workday",
+        profile=sample_profile,
+        history=history,
+    )
+    assert r.answer == "LinkedIn"
+    assert r.source == "history"
+    assert r.interaction_recipe is not None
+    assert r.interaction_recipe["description"] == "Custom learned recipe"
+    assert len(r.interaction_recipe["steps"]) == 2  # custom, not the 3-step playbook
+
+
+def test_resolve_batch_includes_recipe(sample_profile):
+    """resolve_batch passes ats_platform and includes interaction_recipe in output."""
+    fields = [{"label": "state", "type": "combobox"}]
+    results = resolve_batch(
+        fields,
+        ats_platform="workday",
+        profile=sample_profile,
+        history=empty_history(),
+    )
+    assert results[0]["answer"] == "CA"
+    assert results[0]["interaction_recipe"] is not None
+    assert results[0]["interaction_recipe"]["widget_type"] == "combobox"
+
+
+def test_resolve_batch_recipe_none_for_unknown_widget(sample_profile):
+    """Fields with no matching playbook have interaction_recipe=None."""
+    fields = [{"label": "first name", "type": "text"}]
+    results = resolve_batch(
+        fields,
+        ats_platform=None,
+        profile=sample_profile,
+        history=empty_history(),
+    )
+    assert results[0]["interaction_recipe"] is None

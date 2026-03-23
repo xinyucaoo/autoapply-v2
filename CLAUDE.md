@@ -33,7 +33,7 @@ uv run autoapply --help               # CLI help
 uv run autoapply profile show         # View current profile
 uv run autoapply profile init         # Create empty profile
 uv run autoapply resolve "first name" # Test resolver (single field)
-uv run autoapply resolve-batch --fields '[{"label":"first name","type":"text"}]'  # Batch resolver (use this in skill)
+uv run autoapply resolve-batch --ats workday --fields '[{"label":"state","type":"combobox"}]'  # Batch resolver with ATS + recipe
 uv run autoapply history list         # View application history
 uv run autoapply history stats        # Application statistics
 ```
@@ -52,6 +52,9 @@ uv run autoapply history stats        # Application statistics
 - `src/autoapply/config.py` — Paths and constants (respects AUTOAPPLY_DIR env var)
 - `skills/autoapply/SKILL.md` — Claude Code application workflow skill
 - Data stored in `~/.autoapply/` (gitignored)
+  - `profile.json` — user profile
+  - `history.json` — application history
+  - `sessions/<ats>.json` — browser login cookies per ATS platform (e.g. `sessions/workday.json`)
 
 ## Using the Skill
 

@@ -151,3 +151,55 @@ def test_history_with_qa_pairs_roundtrip():
     assert qa.normalized_key == "personal.first_name"
     assert qa.answer == "Jane"
     assert qa.user_verified is True
+
+
+def test_qapair_with_recipe_roundtrip():
+    """QAPair.interaction_recipe persists through save/load."""
+    from autoapply.models.history import InteractionRecipe, InteractionStep
+    recipe = InteractionRecipe(
+        widget_type="combobox",
+        ats_platform="workday",
+        description="Click, type, Enter",
+        steps=[
+            InteractionStep(action="click", target="{idx}", wait_ms=300),
+            InteractionStep(action="type", target="{idx}", value="{answer}", wait_ms=500),
+            InteractionStep(action="keys", target="Enter", wait_ms=300),
+        ],
+    )
+    h = load_history()
+    record = new_record("https://example.wd5.myworkdayjobs.com/job/1", "TestCo", "Engineer")
+    record.qa_pairs.append(QAPair(
+        field_label="State",
+        field_type="combobox",
+        answer="CA",
+        source="profile",
+        interaction_recipe=recipe,
+    ))
+    h = add_record(h, record)
+    save_history(h)
+
+    loaded = load_history()
+    qa = loaded.applications[0].qa_pairs[0]
+    assert qa.interaction_recipe is not None
+    assert qa.interaction_recipe.widget_type == "combobox"
+    assert qa.interaction_recipe.ats_platform == "workday"
+    assert len(qa.interaction_recipe.steps) == 3
+    assert qa.interaction_recipe.steps[1].value == "{answer}"
+
+
+def test_qapair_without_recipe_roundtrip():
+    """QAPair without interaction_recipe serializes with recipe=None."""
+    h = load_history()
+    record = new_record("https://example.com/jobs/1", "TestCo", "Engineer")
+    record.qa_pairs.append(QAPair(
+        field_label="First Name",
+        field_type="text",
+        answer="Jane",
+        source="profile",
+    ))
+    h = add_record(h, record)
+    save_history(h)
+
+    loaded = load_history()
+    qa = loaded.applications[0].qa_pairs[0]
+    assert qa.interaction_recipe is None
