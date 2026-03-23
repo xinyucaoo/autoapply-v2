@@ -135,6 +135,7 @@ CANONICAL_MAP: dict[str, str] = {
     "college": "education.0.school",
     "institution": "education.0.school",
     "school name": "education.0.school",
+    "school or university": "education.0.school",
     "university name": "education.0.school",
     "degree": "education.0.degree",
     "degree type": "education.0.degree",
@@ -150,6 +151,8 @@ CANONICAL_MAP: dict[str, str] = {
     "expected graduation": "education.0.graduation_date",
     "gpa": "education.0.gpa",
     "grade point average": "education.0.gpa",
+    "overall result": "education.0.gpa",
+    "overall result (gpa)": "education.0.gpa",
     # Experience
     "current company": "experience.0.company",
     "current employer": "experience.0.company",

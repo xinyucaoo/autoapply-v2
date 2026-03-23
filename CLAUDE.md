@@ -34,6 +34,8 @@ uv run autoapply profile show         # View current profile
 uv run autoapply profile init         # Create empty profile
 uv run autoapply resolve "first name" # Test resolver (single field)
 uv run autoapply resolve-batch --ats workday --fields '[{"label":"state","type":"combobox"}]'  # Batch resolver with ATS + recipe
+uv run autoapply fill-prep --state /tmp/state.txt --resolver /tmp/resolver.json  # Build fill engine input
+uvx browser-use python --file scripts/fill_engine.py  # Run fill engine
 uv run autoapply history list         # View application history
 uv run autoapply history stats        # Application statistics
 ```
@@ -48,6 +50,10 @@ uv run autoapply history stats        # Application statistics
 - `src/autoapply/commands/profile.py` — `autoapply profile` CLI subcommands
 - `src/autoapply/commands/history.py` — `autoapply history` CLI subcommands
 - `src/autoapply/commands/resolve.py` — `autoapply resolve` CLI command
+- `src/autoapply/commands/fill_engine.py` — `autoapply fill-prep` CLI command
+- `src/autoapply/services/fill_prep.py` — Parses browser-use state + builds fill engine input JSON
+- `src/autoapply/services/playbooks.py` — Per-ATS widget interaction recipes
+- `scripts/fill_engine.py` — Self-contained fill script (runs inside browser-use python session)
 - `src/autoapply/cli.py` — Click CLI entry point
 - `src/autoapply/config.py` — Paths and constants (respects AUTOAPPLY_DIR env var)
 - `skills/autoapply/SKILL.md` — Claude Code application workflow skill

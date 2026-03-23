@@ -34,302 +34,88 @@ Note the company name and job title. If profile is empty or missing, stop and te
 
 ## Step 2: Open the Job Page
 
-**Detect ATS platform from the URL** (no extra tool call needed — just inspect the URL string):
-- `myworkdayjobs.com` or `wd*.myworkday*` → `workday`
-- `greenhouse.io` or `boards.greenhouse` → `greenhouse`
-- `lever.co` or `jobs.lever` → `lever`
-- `icims.com` → `icims`
-- Unknown → omit `--ats` flag
-
-Store this as `<ats>` and pass it to all `resolve-batch` calls in Step 3B.
-
-**Import stored session cookies** (if a saved session exists for this ATS):
-
 ```bash
-uvx browser-use --headed open "<url>" && uvx browser-use cookies import ~/.autoapply/sessions/<ats>.json
+browser-use --headed open "<url>"
 ```
 
-If no session file exists yet, skip the import — just open the page:
+Get state (not screenshot) to find the Apply button:
 
 ```bash
-uvx browser-use --headed open "<url>"
+browser-use state
 ```
-
-Get state to see if login is needed:
-
-```bash
-uvx browser-use state
-```
-
-**If a login page appears**: Tell the user "Please log in, then let me know to continue." Wait for the user to log in. Once they confirm, **immediately save the session**:
-
-```bash
-mkdir -p ~/.autoapply/sessions && uvx browser-use cookies export ~/.autoapply/sessions/<ats>.json
-```
-
-This session will be reused on all future applications to the same ATS, skipping the login step entirely.
 
 Click Apply and navigate to the application form:
 
 ```bash
-uvx browser-use click <index>
+browser-use click <index>
 ```
 
 ---
 
-## Step 3: Per-Page Batch Workflow
+## Step 3: Fill Each Application Page
 
-Repeat this workflow for **each page** of the application form.
+**Target: ~5 tool calls per page** (not 30+)
 
-### 3A: Scan the page
-
-```bash
-uvx browser-use state
-```
-
-From the state output, identify ALL form fields on the current page:
-- Their element indices
-- Their labels / aria-labels
-- Their **widget type** — critical for recipe selection:
-  - `text` / `textarea` — standard text input
-  - `select` — native HTML `<select>` dropdown
-  - `combobox` — custom combo-box with `role="combobox"`, or any Workday dropdown that isn't a native `<select>` (state, country, degree, "how did you hear about us?", etc.)
-  - `radio` — radio button group
-  - `checkbox` — checkbox
-  - `file` — file upload
-  - `date_segmented` — date with separate month/day/year segments (Workday)
-  - `react_virtualized` — Workday ReactVirtualized list (field-of-study etc.)
-- Available options for selects/radios/comboboxes
-
-### 3B: Batch resolve ALL fields at once
-
-Build a single JSON array of all fields and call the resolver once, **passing `--ats <ats>`**:
+### 3A: Scan page
 
 ```bash
-uv run autoapply resolve-batch --ats workday --company "<company>" --fields '[
-  {"label": "First Name", "type": "text"},
-  {"label": "Email", "type": "text"},
-  {"label": "State", "type": "combobox"},
-  {"label": "Work Authorization", "type": "combobox", "options": ["Yes", "No"]},
-  {"label": "How did you hear about us?", "type": "combobox", "options": ["LinkedIn", "Referral", "Other"]},
-  {"label": "Gender", "type": "select", "options": ["Male", "Female", "Decline to State"]}
-]'
+uvx browser-use state > /tmp/page_state.txt && cat /tmp/page_state.txt
 ```
 
-This returns a JSON array — one result per field. **Each result may include an `interaction_recipe`** that tells you exactly how to fill the field, eliminating trial-and-error.
+Read the output and identify:
+- All form fields (labels, element IDs, widget types)
+- Which fields are required (`required=true`)
+- The Save/Continue button index
 
-### 3C: Classify fields by policy
+### 3B: Resolve all fields
 
-Split the resolved fields into two groups:
-
-**AUTOFILL** (policy=`autofill`, confidence=`high`) — fill without asking.
-
-**PROMPT** (policy=`suggest_only`, `always_prompt`, or `ask_user`) — collect and ask user.
-
-### 3D: Batch fill autofill fields using interaction recipes
-
-**If `interaction_recipe` is present** in the resolver output for a field, follow its steps exactly — substitute `{idx}` with the actual element index and `{answer}` with the resolved answer. Do NOT try other approaches first.
-
-**Recipe widget types and how to execute them:**
-
-**`combobox`** (Workday state, country, degree, "how did you hear", etc.):
-```bash
-uvx browser-use python "
-import time
-combos = [
-    (42, 'Illinois'),   # State
-    (55, 'LinkedIn'),   # How did you hear about us?
-]
-results = []
-for idx, val in combos:
-    try:
-        browser.click(idx)      # Step 1: open combo box
-        time.sleep(0.3)
-        browser.type(val)       # Step 2: type to filter
-        time.sleep(0.5)
-        browser.keys('Enter')   # Step 3: select top match
-        time.sleep(0.3)
-        results.append(f'OK: [{idx}]={val!r}')
-    except Exception as e:
-        results.append(f'ERR: [{idx}] {e}')
-print('\n'.join(results))
-"
-```
-
-**`react_virtualized`** (Workday field-of-study — does NOT respond to type, must use keys):
-```bash
-uvx browser-use python "
-import time
-browser.click(63)               # open the dropdown
-time.sleep(0.4)
-browser.keys('C')               # type char by char via keys
-time.sleep(0.1)
-browser.keys('o')
-# ... continue for full value
-time.sleep(0.6)
-"
-# then: uvx browser-use state → find matching option index → uvx browser-use click <idx>
-```
-
-**`date_segmented`** (Workday start date, graduation date — separate month/day/year inputs):
-```bash
-uvx browser-use python "
-import time
-browser.click(71)           # month segment
-time.sleep(0.2)
-browser.keys('05')          # type MM
-time.sleep(0.2)
-browser.click(72)           # day segment
-time.sleep(0.2)
-browser.keys('01')          # type DD
-time.sleep(0.2)
-browser.click(73)           # year segment
-time.sleep(0.2)
-browser.keys('2026')        # type YYYY
-"
-```
-
-**`select`** (native HTML select):
-```bash
-uvx browser-use python "
-import time
-selects = [
-    (28, 'Female'),     # Gender
-]
-for idx, option in selects:
-    browser.click(idx)
-    time.sleep(0.2)
-    browser.select(idx, option)
-"
-```
-
-**`radio`**: click the radio button index whose label matches the answer.
-
-**`text` / `textarea`** (no recipe needed — use standard batch fill):
-```bash
-uvx browser-use python "
-fields = [
-    (3, 'Xinyu'),
-    (4, 'Cao'),
-    (5, 'xinyucao@example.com'),
-    (7, '5551234567'),
-]
-results = []
-for idx, val in fields:
-    try:
-        browser.input(idx, val)
-        results.append(f'OK: [{idx}]={val!r}')
-    except Exception as e:
-        results.append(f'ERR: [{idx}] {e}')
-print('\n'.join(results))
-"
-```
-
-**If `interaction_recipe` is null** and the field is a select/combobox, fall back to: click to open → `browser.select(idx, option)`. If that fails, use the combobox pattern (click → type → Enter).
-
-### 3E: Take a single verification screenshot
-
-After batch filling autofill fields:
+Build a JSON array of all visible fields with their labels and widget types, then resolve:
 
 ```bash
-uvx browser-use screenshot
+uv run autoapply resolve-batch --ats <ats> --company "<company>" --fields '<fields_json>' > /tmp/resolver_output.json
 ```
 
-### 3G: Batch prompt user for non-autofill fields
+### 3C: Collect user input for PROMPT fields
 
-If there are any PROMPT fields (suggest_only, always_prompt, ask_user), present them ALL together
-in a single numbered list before filling any of them:
+Read `/tmp/resolver_output.json`. For fields with `policy: "suggest_only"`, `"always_prompt"`, or `"ask_user"`, ask the user in a single batch message before proceeding.
 
-```
-I need input for [N] fields before continuing:
+After receiving answers, update the resolver output JSON with the user's answers.
 
-[1] "Why are you interested in this role?" (open text)
-    No previous answer found.
-
-[2] "Years of experience in software development" (select)
-    Options: Less than 1 | 1-3 | 3-5 | 5-10 | 10+
-    Suggested: 5-10 (from your experience history since 2020-06)
-
-[3] "Expected salary" (text — always_prompt)
-    Suggested: 175000 (from your profile)
-    Note: This field always requires your confirmation.
-```
-
-The user can reply: `"1: I'm passionate about this. 2: 5-10. 3: 180000"`
-
-"accept" uses the suggestion. "skip" leaves blank (use with caution on required fields).
-
-Wait for user reply before filling these fields.
-
-**EEO fields (gender, race, veteran, disability)** have `autofill` policy — fill them automatically from
-the profile without prompting. If the profile has no EEO value and the resolver returns `ask_user`,
-ask the user once, then **persist to profile** so it autofills on future applications:
+### 3D: Build fill engine input + fill all fields
 
 ```bash
-uv run autoapply profile set eeo.gender "Male"
-uv run autoapply profile set eeo.race_ethnicity "Asian"
-uv run autoapply profile set eeo.veteran_status "I am not a protected veteran"
-uv run autoapply profile set eeo.disability_status "I don't wish to answer"
+# Build fill engine input (auto-maps labels to DOM elements)
+uv run autoapply fill-prep \
+  --state /tmp/page_state.txt \
+  --resolver /tmp/resolver_output.json \
+  --ats <ats> \
+  --output /tmp/autoapply_fill_input.json
+
+# Run fill engine (fills everything deterministically)
+uvx browser-use python --file scripts/fill_engine.py
+
+# Check results
+cat /tmp/autoapply_fill_output.json
 ```
 
-### 3H: Fill user-provided answers in batch
+### 3E: Handle failures and special fields
 
-Use the same recipe-driven approach as 3D — check `interaction_recipe` for each user-answered field and apply the appropriate pattern:
+Read the fill output. For any `"status": "failure"`, `"error"`, or `"manual_required"` fields:
+- **Radio buttons**: Use JS via `uvx browser-use eval` to find and click the correct radio
+- **Date segmented**: Find the segment indices from state and fill with `browser.keys()`
+- **Unknown fields**: Ask the user, then use `uvx browser-use input <idx> <value>` or `browser.type()`
 
-```bash
-uvx browser-use python "
-import time
-# User-provided text answers
-user_fields = [
-    (22, '5-10'),    # years of experience — user selected
-    (31, '180000'),  # expected salary — user provided
-]
-for idx, val in user_fields:
-    browser.input(idx, val)
-    time.sleep(0.1)
+**Note:** Fields auto-matched by `fill-prep` but with wrong mapping will show as failures. Re-check the state text and manually fill those fields.
 
-# User-confirmed selects / combos — use recipe pattern if available
-user_combos = [
-    (28, 'Female'),  # gender — user confirmed; recipe says combobox → click/type/Enter
-]
-for idx, val in user_combos:
-    browser.click(idx)
-    time.sleep(0.3)
-    browser.type(val)
-    time.sleep(0.4)
-    browser.keys('Enter')
-"
-```
+### 3F: Pre-navigation validation
 
-### 3I: Validate, screenshot, and navigate
+Before clicking Save/Continue:
+1. Check fill output for any failures
+2. Run `uvx browser-use state` and scan for `Error` text, `Select One` in required fields, `MM`/`YYYY` placeholders
+3. Fix any issues
+4. Click Save/Continue and verify new page loaded (not same page with `Errors Found`)
 
-**Pre-navigation check** — run before every Save/Continue click to prevent validation error round-trips:
-
-```bash
-uvx browser-use state
-```
-
-Scan the output for:
-- Any `Error` text (inline field errors)
-- `required=true` inputs with placeholder/empty values: `MM`, `YYYY`, `MM/YYYY`, `Select One`, `""`
-- Date segment displays still showing `MM` or `YYYY` (not filled yet)
-
-If issues found, fix them using the appropriate recipe, then re-scan. For date segments verify with eval:
-
-```bash
-uvx browser-use eval "document.getElementById('<dateSectionMonth-display-id>').textContent"
-```
-
-Once state is clean, take screenshot and click:
-
-```bash
-uvx browser-use screenshot
-uvx browser-use click <next_or_save_button_index>
-```
-
-Wait 1-2 seconds, then run `uvx browser-use state` again:
-- **`Errors Found` still visible** → navigation failed; fix remaining errors and retry
-- **New page/step appears** → proceed to Step 3A for the new page
+**EEO fields** (gender, race, veteran, disability) have `autofill` policy — they fill automatically from profile via the fill engine without prompting.
 
 ---
 
@@ -368,60 +154,26 @@ Wait for "yes" before clicking Submit.
 ## Step 5: Submit
 
 ```bash
-uvx browser-use click <submit_button_index>
+browser-use click <submit_button_index>
 ```
 
-Wait for confirmation page. Take a screenshot to confirm success:
-
-```bash
-uvx browser-use screenshot
-```
+Wait for confirmation page. Take a screenshot to confirm success.
 
 ---
 
 ## Step 6: Record the Application
 
-When building `qa_pairs`, **include `interaction_recipe`** for any field that used a non-standard interaction (combobox, date_segmented, react_virtualized). Use `{idx}` and `{answer}` as placeholders — not hardcoded values — so the recipe works on the next application too.
-
 ```bash
-uv run autoapply history add '{
+autoapply history add '{
   "id": "<uuid4>",
   "url": "<job_url>",
   "company": "<company>",
   "job_title": "<title>",
   "applied_at": "<ISO8601>",
   "status": "submitted",
-  "qa_pairs": [
-    {
-      "field_label": "State",
-      "field_type": "combobox",
-      "answer": "Illinois",
-      "source": "profile",
-      "user_verified": false,
-      "interaction_recipe": {
-        "widget_type": "combobox",
-        "ats_platform": "workday",
-        "description": "Click to open, type to filter, Enter to select",
-        "steps": [
-          {"action": "click", "target": "{idx}", "wait_ms": 300},
-          {"action": "type", "target": "{idx}", "value": "{answer}", "wait_ms": 500},
-          {"action": "keys", "target": "Enter", "wait_ms": 300}
-        ]
-      }
-    },
-    {
-      "field_label": "First Name",
-      "field_type": "text",
-      "answer": "Xinyu",
-      "source": "profile",
-      "user_verified": false,
-      "interaction_recipe": null
-    }
-  ]
+  "qa_pairs": [...]
 }'
 ```
-
-For **standard text fields** (First Name, Email, etc.), `interaction_recipe` should be `null` — no recipe needed.
 
 Generate UUID and timestamp:
 ```bash
@@ -436,17 +188,19 @@ python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone
 - **Always invoke browser-use as `uvx browser-use`** (it's a Python tool, not npm). Never use `browser-use` or `npx browser-use`.
 - **Always use `--headed`** so the user can see the browser in real time.
 - **Batch is the default** — only fall back to individual commands for tricky fields that fail.
-- **Use `interaction_recipe` first** — if the resolver returns a recipe, follow it exactly. Never trial-and-error for combo-boxes, date fields, or ReactVirtualized dropdowns.
-- **Workday shadow DOM**: Inputs are often inside shadow roots. If `uvx browser-use input <idx>` fails,
-  use `uvx browser-use eval "document.querySelector('...').value = '...'"` or click by pixel coordinates.
-- **Combobox vs select**: In Workday, most dropdowns are comboboxes (`role="combobox"`), not native `<select>`. They need click → type → Enter, not click → select. Identify them in Step 3A.
+- **Workday shadow DOM**: Inputs are often inside shadow roots. If `browser-use input <idx>` fails,
+  use `browser-use eval` with `findInShadow()` or click by pixel coordinates.
+- **ReactVirtualized dropdowns** (Workday field-of-study etc.): They don't filter on fill/type.
+  Click the field to open it, then use `browser-use keys` to type character by character,
+  then press `Enter` to filter, then click the matching option from state output.
+- **Date fields**: Click the month/day/year segments individually and use `browser-use keys` to type digits.
 - **CAPTCHA**: Tell user "A CAPTCHA appeared — please solve it, then let me know to continue."
-- **Page reload**: `uvx browser-use eval "window.location.reload()"`
-- **Scroll to reveal hidden fields**: `uvx browser-use scroll down`
+- **Page reload**: `browser-use eval "window.location.reload()"`
+- **Scroll to reveal hidden fields**: `browser-use scroll down`
 - **If batch fill partially fails**: The python script prints ERR lines — fix only those fields
   individually, don't re-run the whole batch.
-- **File uploads**: `uvx browser-use upload <index> "<absolute_path>"`
-  Get path from: `uv run autoapply profile show documents`
+- **File uploads**: `browser-use upload <index> "<absolute_path>"`
+  Get path from: `autoapply profile show documents`
 
 ---
 
