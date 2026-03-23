@@ -11,6 +11,19 @@ uv sync --dev
 uv run autoapply profile init
 ```
 
+## Browser Automation
+
+`browser-use` is a Python tool installed via `uvx`. Always invoke it as:
+
+```bash
+uvx browser-use state
+uvx browser-use --headed open <url>
+uvx browser-use click <index>
+# etc.
+```
+
+Do NOT use `browser-use`, `npx browser-use`, or any other invocation — only `uvx browser-use`.
+
 ## Development Commands
 
 ```bash
@@ -19,7 +32,8 @@ uv run pytest tests/test_resolver.py  # Run resolver tests only
 uv run autoapply --help               # CLI help
 uv run autoapply profile show         # View current profile
 uv run autoapply profile init         # Create empty profile
-uv run autoapply resolve "first name" # Test resolver
+uv run autoapply resolve "first name" # Test resolver (single field)
+uv run autoapply resolve-batch --fields '[{"label":"first name","type":"text"}]'  # Batch resolver (use this in skill)
 uv run autoapply history list         # View application history
 uv run autoapply history stats        # Application statistics
 ```

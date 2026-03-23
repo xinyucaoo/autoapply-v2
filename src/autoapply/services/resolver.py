@@ -276,6 +276,61 @@ class ResolveResult:
     suggestion: str | None  # Human-readable suggestion text
 
 
+def resolve_batch(
+    fields: list[dict],
+    company: str | None = None,
+    profile: Profile | None = None,
+    history: ApplicationHistory | None = None,
+) -> list[dict]:
+    """
+    Resolve multiple form fields in a single call.
+
+    Loads profile and history once (if not provided), then resolves each field.
+
+    Args:
+        fields: list of dicts with keys: label (str), type (str, optional),
+                options (list[str], optional)
+        company: company name for scoped history lookup
+        profile: pre-loaded Profile (skips disk load; useful in tests)
+        history: pre-loaded ApplicationHistory (skips disk load; useful in tests)
+
+    Returns:
+        list of dicts with keys: label, answer, source, profile_path,
+        confidence, policy, suggestion
+    """
+    from autoapply.services.profile_store import load_profile
+    from autoapply.services.history_store import load_history
+
+    if profile is None:
+        profile = load_profile()
+    if history is None:
+        history = load_history()
+
+    results = []
+    for field in fields:
+        label = field.get("label", "")
+        field_type = field.get("type", "text")
+        options = field.get("options")
+        result = resolve(
+            label=label,
+            field_type=field_type,
+            options=options,
+            company=company,
+            profile=profile,
+            history=history,
+        )
+        results.append({
+            "label": label,
+            "answer": result.answer,
+            "source": result.source,
+            "profile_path": result.profile_path,
+            "confidence": result.confidence,
+            "policy": result.policy,
+            "suggestion": result.suggestion,
+        })
+    return results
+
+
 def resolve(
     label: str,
     field_type: str = "text",

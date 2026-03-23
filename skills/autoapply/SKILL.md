@@ -14,131 +14,168 @@ This skill orchestrates the end-to-end job application process. You (Claude Code
 orchestrator. All deterministic field resolution happens in the `autoapply` CLI — use your
 own judgment only as a fallback for fields the resolver cannot answer.
 
+**Speed principle:** Minimize LLM round-trips. Use batch operations everywhere possible.
+Each page should take ~8-10 tool calls total, not 50+.
+
 ---
 
-## Step 1: Prerequisites Check
+## Step 1: Prerequisites + Context Load
 
-Load the user's profile and confirm it exists:
+Load profile and history in a single step:
 
 ```bash
-autoapply profile show
+autoapply profile show && autoapply history search "<company name>"
 ```
 
-If the output is an empty profile (all blank fields) or the command fails, stop and tell the user:
-
+Note the company name and job title. If profile is empty or missing, stop and tell the user:
 > "No profile found. Run `autoapply profile init` and fill in your details before applying."
 
 ---
 
-## Step 2: Load Context
-
-Load relevant history for this company to inform later resolution:
-
-```bash
-autoapply profile show
-autoapply history search "<company name>"
-```
-
-Note the company name and job title from the URL or user's request — you'll need them throughout.
-
----
-
-## Step 3: Open the Job Page
+## Step 2: Open the Job Page
 
 ```bash
 browser-use --headed open "<url>"
 ```
 
-Take a screenshot and look for an "Apply", "Apply Now", or "Easy Apply" button. Click it:
-
-```bash
-browser-use click <index>
-```
-
-If the application opens in a new tab or iframe, navigate to it.
-
----
-
-## Step 4: Scan Form Fields
-
-Get the current page state to see all form elements:
+Get state (not screenshot) to find the Apply button:
 
 ```bash
 browser-use state
 ```
 
-This returns a numbered list of interactive elements. Identify all form fields:
-- Text inputs (type=text, email, tel, url, number)
-- Textareas
-- Select dropdowns
-- Radio button groups
-- Checkboxes
-- File upload inputs
-
-For each select/radio/checkbox, note the available options.
-
----
-
-## Step 5: Per-Field Resolution Loop
-
-For EACH form field on the current page, call the resolver before deciding what to fill:
+Click Apply and navigate to the application form:
 
 ```bash
-autoapply resolve "<field label>" --type <type> --company "<company>" [--options "opt1,opt2,opt3"]
-```
-
-Examples:
-```bash
-autoapply resolve "First Name" --type text --company "Acme Corp"
-autoapply resolve "Work Authorization" --type select --options "US Citizen,Green Card,H-1B,Other" --company "Acme Corp"
-autoapply resolve "Desired Salary" --type text --company "Acme Corp"
-autoapply resolve "Gender" --type select --options "Male,Female,Non-binary,Prefer not to say,Decline to state" --company "Acme Corp"
-```
-
-The resolver outputs JSON:
-```json
-{
-  "answer": "Jane",
-  "source": "profile",
-  "profile_path": "personal.first_name",
-  "confidence": "high",
-  "policy": "autofill",
-  "suggestion": null
-}
+browser-use click <index>
 ```
 
 ---
 
-## Step 6: Policy Enforcement
+## Step 3: Per-Page Batch Workflow
 
-Apply the following rules based on the `policy` field:
+Repeat this workflow for **each page** of the application form.
 
-### `autofill` + `confidence: high`
-Fill the field immediately without asking the user.
+### 3A: Scan the page
 
 ```bash
-browser-use input <index> "Jane"
+browser-use state
 ```
 
-### `suggest_only`
-Do NOT fill yet. Collect this field for the batch prompt (Step 7).
+From the state output, identify ALL form fields on the current page:
+- Their element indices
+- Their labels / aria-labels
+- Their types (text, select/dropdown, radio, checkbox, textarea, file)
+- Available options for selects/radios
 
-### `always_prompt`
-Do NOT fill yet. Always collect for batch prompt even if an answer is available.
+### 3B: Batch resolve ALL fields at once
 
-### `ask_user` (answer is null)
-Do NOT fill yet. Collect for batch prompt. Claude Code may infer from profile context
-as a suggested answer, but must present it to the user for confirmation.
+Build a single JSON array of all fields and call the resolver once:
 
----
+```bash
+autoapply resolve-batch --company "<company>" --fields '[
+  {"label": "First Name", "type": "text"},
+  {"label": "Email", "type": "text"},
+  {"label": "Work Authorization", "type": "select", "options": ["Yes", "No"]},
+  {"label": "Gender", "type": "select", "options": ["Male", "Female", "Decline to State"]}
+]'
+```
 
-## Step 7: Batched User Prompts
+This returns a JSON array — one result per field — loaded in a single subprocess call.
 
-After processing all fields on the current page section, collect all fields that need
-user input (suggest_only, always_prompt, ask_user) and present them TOGETHER in a
-single numbered list before filling any of them.
+### 3C: Classify fields by policy
 
-Format:
+Split the resolved fields into two groups:
+
+**AUTOFILL** (policy=`autofill`, confidence=`high`) — fill without asking:
+- text, textarea, file fields: use `browser-use python` to fill in batch
+- select/radio/checkbox fields: use `browser-use python` to click/select in batch
+
+**PROMPT** (policy=`suggest_only`, `always_prompt`, or `ask_user`) — collect and ask user.
+
+### 3D: Batch fill autofill text fields
+
+Fill all autofill text/textarea inputs in a single `browser-use python` call:
+
+```bash
+browser-use python "
+fields = [
+    (3, 'Xinyu'),
+    (4, 'Cao'),
+    (5, 'xinyucao@example.com'),
+    (7, '5551234567'),
+]
+results = []
+for idx, val in fields:
+    try:
+        browser.input(idx, val)
+        results.append(f'OK: [{idx}]={val!r}')
+    except Exception as e:
+        results.append(f'ERR: [{idx}] {e}')
+print('\n'.join(results))
+"
+```
+
+### 3E: Batch fill autofill selects/dropdowns
+
+Fill all autofill select/dropdown/radio fields in one call:
+
+```bash
+browser-use python "
+import time
+results = []
+
+# Dropdowns: click to open, then select
+dropdowns = [
+    (12, 'Yes'),    # Work Authorization
+    (15, 'No'),     # Sponsorship
+]
+for idx, option in dropdowns:
+    try:
+        browser.click(idx)
+        time.sleep(0.3)
+        browser.select(idx, option)
+        results.append(f'OK: [{idx}]={option!r}')
+    except Exception as e:
+        results.append(f'ERR: [{idx}] {e}')
+
+print('\n'.join(results))
+"
+```
+
+For **Workday-style dropdowns** (combo boxes): click to open, type to filter, then press Enter:
+```bash
+browser-use python "
+import time
+browser.click(42)   # open combo box
+time.sleep(0.3)
+browser.type('Computer Engineering')
+time.sleep(0.3)
+browser.keys('Enter')
+time.sleep(0.5)
+# options now filtered — find and click the match
+"
+```
+
+For **radio buttons / checkboxes**: click by index or use JS:
+```bash
+browser-use eval "document.querySelector('[aria-label=\"Yes\"]').click()"
+```
+
+### 3F: Take a single verification screenshot
+
+After batch filling autofill fields:
+
+```bash
+browser-use screenshot
+```
+
+Visually confirm the filled values look correct. If anything is wrong, fix it before proceeding.
+
+### 3G: Batch prompt user for non-autofill fields
+
+If there are any PROMPT fields (suggest_only, always_prompt, ask_user), present them ALL together
+in a single numbered list before filling any of them:
 
 ```
 I need input for [N] fields before continuing:
@@ -157,129 +194,93 @@ I need input for [N] fields before continuing:
 [4] "Expected salary" (text — always_prompt)
     Suggested: 175000 (from your profile)
     Note: This field always requires your confirmation.
-
-[5] "How did you hear about us?" (select)
-    Options: LinkedIn | Referral | Company website | Job board | Other
-    Previous answer at Acme Corp: LinkedIn
 ```
 
-The user can reply with just the answers:
-> "1: I'm passionate about distributed systems. 2: 5-10. 3: accept. 4: 180000. 5: LinkedIn"
+The user can reply: `"1: I'm passionate about this. 2: 5-10. 3: accept. 4: 180000"`
 
-Or "accept" / "skip" any suggestion. "skip" leaves the field blank (use with caution).
+"accept" uses the suggestion. "skip" leaves blank (use with caution on required fields).
 
-Wait for the user's reply before proceeding to fill any of these fields.
+Wait for user reply before filling these fields.
+
+### 3H: Fill user-provided answers in batch
+
+```bash
+browser-use python "
+import time
+# User-provided answers
+user_fields = [
+    (22, '5-10'),    # years of experience — user selected
+    (31, '180000'),  # expected salary — user provided
+]
+for idx, val in user_fields:
+    browser.input(idx, val)
+    time.sleep(0.1)
+
+# User-confirmed selects
+user_selects = [
+    (28, 'Female'),  # gender — user confirmed
+]
+for idx, option in user_selects:
+    browser.click(idx)
+    time.sleep(0.3)
+    browser.select(idx, option)
+"
+```
+
+### 3I: Navigate to next page
+
+```bash
+browser-use state
+browser-use click <next_or_save_button_index>
+```
+
+Wait 1-2 seconds for page transition, then repeat from Step 3A.
 
 ---
 
-## Step 8: Fill Fields
+## Step 4: Pre-Submission Review
 
-After collecting all answers (from autofill + user responses), fill them one by one:
-
-**Text/textarea:**
-```bash
-browser-use input <index> "<answer>"
-```
-
-**Select dropdown:**
-```bash
-browser-use click <index>   # Open dropdown
-browser-use state            # Read options
-browser-use select <index> "<option value>"
-```
-
-**Radio button:**
-```bash
-browser-use state            # Read all radio options
-browser-use click <radio_index>  # Click the matching option
-```
-
-**Checkbox (yes/no):**
-```bash
-browser-use click <index>    # Toggle on if answer is "Yes"/"true"
-```
-
-**File upload (resume/cover letter):**
-```bash
-# Get document path from profile
-autoapply profile show documents
-browser-use upload <index> "<absolute_path_to_file>"
-```
-
-After filling each field, verify it was accepted:
-```bash
-browser-use get value <index>
-```
-
----
-
-## Step 9: Multi-Page Navigation
-
-Look for "Next", "Continue", "Save and Continue", or "Next Step" buttons:
-
-```bash
-browser-use state            # Find navigation buttons
-browser-use click <next_button_index>
-```
-
-After clicking, wait for the page to update, then repeat Steps 4-8 for the new page.
-Track which pages you've completed and which fields you've filled.
-
----
-
-## Step 10: Pre-Submission Review
-
-Before clicking Submit, compile a summary table of ALL fields filled across all pages
-and present it to the user:
+Before clicking Submit, compile a summary table and present to user:
 
 ```
 Ready to submit your application to Acme Corp — Senior Engineer.
-
-Here is a summary of all fields filled:
 
 PERSONAL
   First Name:           Jane
   Last Name:            Doe
   Email:                jane@example.com
   Phone:                555-123-4567
-  LinkedIn:             https://linkedin.com/in/janedoe
 
 WORK AUTHORIZATION
   Authorized (US):      Yes
   Sponsorship needed:   No
 
 EDUCATION
-  School:               MIT
-  Degree:               Bachelor of Science
-  Field:                Computer Science
-  Graduation:           2020-05
+  School:               MIT | Degree: Bachelor of Science | GPA: 3.8
 
-CUSTOM / MANUAL
+CUSTOM / USER-PROVIDED
   Why interested:       I'm passionate about distributed systems.
-  Expected salary:      180000
+  Expected salary:      180000 (you confirmed)
   Gender:               Female (you confirmed)
 
 Shall I submit? (yes / no / edit <field>)
 ```
 
-Wait for the user to confirm "yes" before proceeding.
+Wait for "yes" before clicking Submit.
 
 ---
 
-## Step 11: Submit
+## Step 5: Submit
 
 ```bash
 browser-use click <submit_button_index>
 ```
 
-Wait for the confirmation page or success message. Take a screenshot to confirm.
-If you see an error, report it to the user before recording.
+Wait for confirmation page. Take a screenshot to confirm success.
 
 ---
 
-## Step 12: Record the Application
-
-Build and save the ApplicationRecord with all Q&A pairs:
+## Step 6: Record the Application
 
 ```bash
 autoapply history add '{
@@ -287,115 +288,78 @@ autoapply history add '{
   "url": "<job_url>",
   "company": "<company>",
   "job_title": "<title>",
-  "applied_at": "<ISO8601_timestamp>",
+  "applied_at": "<ISO8601>",
   "status": "submitted",
-  "qa_pairs": [
-    {
-      "field_label": "First Name",
-      "normalized_key": "personal.first_name",
-      "field_type": "text",
-      "answer": "Jane",
-      "source": "profile",
-      "company": "<company>",
-      "user_verified": false
-    },
-    {
-      "field_label": "Expected salary",
-      "normalized_key": "salary.desired",
-      "field_type": "text",
-      "answer": "180000",
-      "source": "user",
-      "company": "<company>",
-      "user_verified": true
-    }
-  ]
+  "qa_pairs": [...]
 }'
 ```
 
-Rules for `source` and `user_verified`:
-- `source: "profile"` — answer came from autoapply resolver, policy was autofill
-- `source: "user"` — user typed a new answer or corrected a suggestion
-- `source: "history"` — answer came from a previous application
-- `source: "inference"` — you inferred the answer from profile context
-- `user_verified: true` — user explicitly confirmed or typed the answer
-- `user_verified: false` — autofilled without user interaction
-
-Generate a UUID4 with:
+Generate UUID and timestamp:
 ```bash
 python3 -c "import uuid; print(uuid.uuid4())"
-```
-
-Get the current timestamp with:
-```bash
 python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())"
 ```
 
 ---
 
+## Operational Tips
+
+- **Always invoke browser-use as `uvx browser-use`** (it's a Python tool, not npm). Never use `browser-use` or `npx browser-use`.
+- **Always use `--headed`** so the user can see the browser in real time.
+- **Batch is the default** — only fall back to individual commands for tricky fields that fail.
+- **Workday shadow DOM**: Inputs are often inside shadow roots. If `browser-use input <idx>` fails,
+  use `browser-use eval` with `findInShadow()` or click by pixel coordinates.
+- **ReactVirtualized dropdowns** (Workday field-of-study etc.): They don't filter on fill/type.
+  Click the field to open it, then use `browser-use keys` to type character by character,
+  then press `Enter` to filter, then click the matching option from state output.
+- **Date fields**: Click the month/day/year segments individually and use `browser-use keys` to type digits.
+- **CAPTCHA**: Tell user "A CAPTCHA appeared — please solve it, then let me know to continue."
+- **Page reload**: `browser-use eval "window.location.reload()"`
+- **Scroll to reveal hidden fields**: `browser-use scroll down`
+- **If batch fill partially fails**: The python script prints ERR lines — fix only those fields
+  individually, don't re-run the whole batch.
+- **File uploads**: `browser-use upload <index> "<absolute_path>"`
+  Get path from: `autoapply profile show documents`
+
+---
+
 ## Field Mapping Reference
 
-When the resolver returns `answer: null` and you need to infer from profile context,
-use this table as a guide. Always present inferred answers as suggestions, never autofill.
+When the resolver returns `answer: null`, use this table for Claude Code's fallback inference.
+Always present inferred answers as suggestions — never autofill unresolved fields.
 
 | Form Field Pattern | Profile Path | Notes |
 |---|---|---|
 | first name, given name, legal first name | personal.first_name | |
 | last name, surname, family name | personal.last_name | |
 | full name, legal name | personal.first_name + " " + personal.last_name | Combine |
-| preferred name, nickname | personal.preferred_name | |
-| pronouns | personal.pronouns | |
-| email, e-mail, work email | personal.email | |
+| email, e-mail | personal.email | |
 | phone, mobile, cell, telephone | personal.phone | |
 | street address, address line 1 | personal.address.street | |
-| city, town | personal.address.city | |
+| city | personal.address.city | |
 | state, province | personal.address.state | |
 | zip, postal code | personal.address.zip | |
 | country | personal.address.country | |
-| linkedin, linkedin url | personal.linkedin_url | |
-| github, github url | personal.github_url | |
+| linkedin url | personal.linkedin_url | |
+| github | personal.github_url | |
 | website, portfolio | personal.portfolio_url | |
 | authorized to work in US | work_authorization.authorized_us | Yes/No |
-| require sponsorship | work_authorization.sponsorship_needed | Yes/No (invert: "No" is good) |
-| citizenship, citizenship status | work_authorization.citizenship | |
+| require sponsorship | work_authorization.sponsorship_needed | Yes/No |
+| citizenship | work_authorization.citizenship | |
 | visa status | work_authorization.visa_status | |
-| school, university, college | education.0.school | Most recent |
-| degree, degree type | education.0.degree | |
+| school, university | education.0.school | Most recent |
+| degree | education.0.degree | |
 | field of study, major | education.0.field | |
-| graduation date, year | education.0.graduation_date | YYYY-MM |
+| graduation date | education.0.graduation_date | YYYY-MM |
 | GPA | education.0.gpa | |
 | current company, employer | experience.0.company | Most recent |
-| current title, job title, position | experience.0.title | |
-| gender, gender identity, sex | eeo.gender | suggest_only |
+| job title, position | experience.0.title | |
+| gender | eeo.gender | suggest_only |
 | race, ethnicity | eeo.race_ethnicity | suggest_only |
 | veteran status | eeo.veteran_status | suggest_only |
 | disability status | eeo.disability_status | suggest_only |
-| salary, expected salary, desired comp | salary.desired | always_prompt |
-| minimum salary | salary.minimum | always_prompt |
-| start date, when can you start | preferences.desired_start_date | always_prompt |
-| remote preference, work arrangement | preferences.remote_preference | |
+| salary, expected salary | salary.desired | always_prompt |
+| start date | preferences.desired_start_date | always_prompt |
+| remote preference | preferences.remote_preference | |
 | willing to relocate | preferences.relocation_willing | suggest_only |
 | years of experience | preferences.years_of_experience | |
-
----
-
-## Operational Tips
-
-- Always use `browser-use --headed` so the user can see what's happening in real time.
-- After filling each field with `browser-use input`, verify with `browser-use get value <index>`.
-- For dropdowns: open with click, then read state to see actual option values before selecting.
-- For radio groups: read all options from state before deciding which to click.
-- For file uploads: use `browser-use upload <index> <absolute_path>` with the path from `autoapply profile show documents`.
-- If a CAPTCHA appears: tell the user "A CAPTCHA appeared — please solve it in the browser, then let me know when to continue."
-- If the page fails to load or goes blank:
-  ```bash
-  browser-use eval "window.location.reload()"
-  ```
-- Scroll down periodically to reveal hidden form sections:
-  ```bash
-  browser-use scroll down
-  ```
-- If a required field is missed before submission, the page will usually highlight it — take a screenshot, identify the field, resolve it, fill it, and retry submit.
-- For optional fields the user wants to skip: confirm with the user before leaving them blank.
-- If the job application redirects to a third-party ATS (Greenhouse, Lever, Workday, etc.), continue the workflow on that page — the resolver works the same regardless of ATS.
-- For multi-step forms, track your progress by noting which page/step number you're on.
-- If an application cannot be completed (login wall, broken form, etc.), record it with `status: "failed"` and explain to the user.

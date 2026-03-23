@@ -1,6 +1,7 @@
 import json
+import sys
 import click
-from autoapply.services.resolver import resolve
+from autoapply.services.resolver import resolve, resolve_batch
 
 
 @click.command("resolve")
@@ -29,3 +30,25 @@ def resolve_cmd(field_label, field_type, options, company):
         "suggestion": result.suggestion,
     }
     click.echo(json.dumps(output, indent=2))
+
+
+@click.command("resolve-batch")
+@click.option("--fields", required=True, help="JSON array of field objects: [{label, type, options}]")
+@click.option("--company", default=None, help="Company name for scoped history lookup")
+def resolve_batch_cmd(fields, company):
+    """Resolve multiple form fields at once from profile/history (single subprocess, single file load).
+
+    --fields expects a JSON array: '[{"label":"First Name","type":"text"},{"label":"Email","type":"text"}]'
+
+    Outputs a JSON array with one result per field.
+    """
+    try:
+        fields_list = json.loads(fields)
+    except json.JSONDecodeError as e:
+        click.echo(f"Error parsing --fields JSON: {e}", err=True)
+        sys.exit(1)
+    if not isinstance(fields_list, list):
+        click.echo("--fields must be a JSON array", err=True)
+        sys.exit(1)
+    results = resolve_batch(fields_list, company=company)
+    click.echo(json.dumps(results, indent=2))

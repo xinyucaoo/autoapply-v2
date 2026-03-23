@@ -1,5 +1,5 @@
 import pytest
-from autoapply.services.resolver import resolve, ResolveResult, _normalize
+from autoapply.services.resolver import resolve, resolve_batch, ResolveResult, _normalize
 from autoapply.models.profile import Profile, Personal, EEO, Salary, Preferences, CustomQA
 from autoapply.models.history import ApplicationHistory
 
@@ -449,3 +449,60 @@ def test_resolve_extra_whitespace(sample_profile):
     """Labels with extra whitespace are handled."""
     r = resolve("  phone  number  ", profile=sample_profile, history=empty_history())
     assert r.answer == "555-123-4567"
+
+
+# ---------------------------------------------------------------------------
+# Batch resolution
+# ---------------------------------------------------------------------------
+
+def test_resolve_batch_returns_all_fields(sample_profile):
+    """resolve_batch resolves multiple fields and returns one result per field."""
+    fields = [
+        {"label": "First Name", "type": "text"},
+        {"label": "Email", "type": "text"},
+        {"label": "Gender", "type": "select", "options": ["Male", "Female"]},
+    ]
+    results = resolve_batch(fields, company=None, profile=sample_profile, history=empty_history())
+    assert len(results) == 3
+    assert results[0]["label"] == "First Name"
+    assert results[0]["answer"] == "Jane"
+    assert results[0]["policy"] == "autofill"
+    assert results[1]["label"] == "Email"
+    assert results[1]["answer"] == "jane@example.com"
+    assert results[2]["label"] == "Gender"
+    assert results[2]["policy"] == "suggest_only"
+
+
+def test_resolve_batch_preserves_label(sample_profile):
+    """Each result includes the original label for correlation."""
+    fields = [{"label": "last name", "type": "text"}]
+    results = resolve_batch(fields, profile=sample_profile, history=empty_history())
+    assert results[0]["label"] == "last name"
+    assert results[0]["answer"] == "Doe"
+
+
+def test_resolve_batch_unknown_field(sample_profile):
+    """Unknown fields return policy=ask_user and answer=None."""
+    fields = [{"label": "completely unknown xyz", "type": "text"}]
+    results = resolve_batch(fields, profile=sample_profile, history=empty_history())
+    assert results[0]["answer"] is None
+    assert results[0]["policy"] == "ask_user"
+
+
+def test_resolve_batch_empty_fields(sample_profile):
+    """Empty fields list returns empty list."""
+    results = resolve_batch([], profile=sample_profile, history=empty_history())
+    assert results == []
+
+
+def test_resolve_batch_mixed_policies(sample_profile):
+    """Batch correctly handles fields with different policies."""
+    fields = [
+        {"label": "first name", "type": "text"},       # autofill
+        {"label": "gender", "type": "select"},          # suggest_only
+        {"label": "desired salary", "type": "text"},    # always_prompt
+        {"label": "mystery field xyz", "type": "text"}, # ask_user
+    ]
+    results = resolve_batch(fields, profile=sample_profile, history=empty_history())
+    policies = [r["policy"] for r in results]
+    assert policies == ["autofill", "suggest_only", "always_prompt", "ask_user"]
