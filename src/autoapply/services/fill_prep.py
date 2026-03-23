@@ -3,7 +3,7 @@ Fill preparation service — parses browser-use state output and builds fill eng
 
 Workflow:
   1. Parse state text to extract {element_id, element_name, aria_label} -> element_idx maps
-  2. Match resolver results to DOM elements using heuristics
+  2. Match resolver results to DOM elements using token-overlap scoring
   3. Return a fill-engine-ready input dict
 """
 from __future__ import annotations
@@ -11,6 +11,102 @@ from __future__ import annotations
 import re
 from typing import Any
 
+
+# ---------------------------------------------------------------------------
+# Semantic synonym table — platform-agnostic label normalization
+# ---------------------------------------------------------------------------
+
+# Each entry expands a token to its semantic equivalents.
+# Bidirectional: if "school" maps to "university", also add "university" -> "school".
+_SYNONYMS: dict[str, frozenset[str]] = {
+    "gpa":            frozenset({"grade", "result"}),
+    "grade":          frozenset({"gpa", "result"}),
+    "result":         frozenset({"gpa", "grade"}),
+    "school":         frozenset({"university", "college", "institution"}),
+    "university":     frozenset({"school", "college"}),
+    "college":        frozenset({"school", "university"}),
+    "employer":       frozenset({"company", "organization"}),
+    "company":        frozenset({"employer", "organization"}),
+    "organization":   frozenset({"employer", "company"}),
+    "zip":            frozenset({"postal"}),
+    "postal":         frozenset({"zip"}),
+    "start":          frozenset({"from", "begin"}),
+    "from":           frozenset({"start", "begin"}),
+    "end":            frozenset({"finish"}),
+    "graduation":     frozenset({"completion"}),
+    "phone":          frozenset({"tel", "mobile", "cell", "telephone"}),
+    "tel":            frozenset({"phone", "mobile", "cell"}),
+    "mobile":         frozenset({"phone", "tel", "cell"}),
+    "street":         frozenset({"address"}),
+    "authorization":  frozenset({"authorized", "auth"}),
+    "authorized":     frozenset({"authorization", "auth"}),
+}
+
+_FILLER_WORDS = frozenset({
+    "select", "one", "please", "enter", "your", "the", "a", "an",
+    "or", "and", "is", "of", "in", "at", "for", "how", "did",
+    "you", "us", "have", "will", "are", "do", "does", "was", "were",
+    "what", "which", "this", "that", "with", "about", "to",
+})
+
+# Minimum overlap score to consider a match valid
+_MATCH_THRESHOLD = 0.35
+
+
+# ---------------------------------------------------------------------------
+# Token helpers
+# ---------------------------------------------------------------------------
+
+def _normalize_tokens(s: str) -> frozenset[str]:
+    """
+    Normalize a human-readable string to a frozenset of meaningful tokens.
+
+    1. Keep parenthetical content as tokens: "Overall Result (GPA)" -> "overall result gpa"
+    2. Lowercase, replace non-alphanumeric with spaces
+    3. Drop filler words and pure numbers
+    4. Expand synonyms
+    """
+    s = re.sub(r'[()]', ' ', s)
+    s = re.sub(r'[^a-z0-9\s]', ' ', s.lower())
+    tokens = {t for t in s.split() if t and t not in _FILLER_WORDS and not t.isdigit()}
+
+    expanded = set(tokens)
+    for token in tokens:
+        expanded.update(_SYNONYMS.get(token, frozenset()))
+    return frozenset(expanded)
+
+
+def _id_to_tokens(elem_id: str) -> frozenset[str]:
+    """
+    Convert an element id or name to a normalized token set.
+
+    'education-5--schoolName'     -> {'education', 'school', 'name', 'university', ...}
+    'name--legalName--firstName'  -> {'name', 'legal', 'first'}
+    """
+    parts = re.split(r'[-]+', elem_id)
+    tokens: set[str] = set()
+    for part in parts:
+        if not part or part.isdigit():
+            continue
+        words = re.sub(r'([a-z])([A-Z])', r'\1 \2', part).lower().split()
+        tokens.update(w for w in words if w not in _FILLER_WORDS and not w.isdigit())
+
+    expanded = set(tokens)
+    for token in tokens:
+        expanded.update(_SYNONYMS.get(token, frozenset()))
+    return frozenset(expanded)
+
+
+def _overlap_score(a: frozenset[str], b: frozenset[str]) -> float:
+    """Token overlap: |intersection| / min(|a|, |b|). Returns 0 if either set is empty."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+# ---------------------------------------------------------------------------
+# State parser
+# ---------------------------------------------------------------------------
 
 def parse_state_elements(state_text: str) -> dict:
     """
@@ -54,66 +150,74 @@ def parse_state_elements(state_text: str) -> dict:
     return {"by_id": by_id, "by_name": by_name, "by_aria_label": by_aria_label}
 
 
-def _camel_to_words(s: str) -> str:
-    """Convert camelCase or PascalCase to lowercase words. e.g. 'firstName' -> 'first name'."""
-    # Insert space before uppercase letters that follow lowercase
-    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", s)
-    return s.lower().strip()
-
+# ---------------------------------------------------------------------------
+# Field matcher
+# ---------------------------------------------------------------------------
 
 def match_field_to_element(field_label: str, widget_type: str | None, elements: dict) -> dict:
     """
-    Try to match a field label to a DOM element using heuristics.
+    Match a field label to a DOM element using token-overlap scoring.
 
-    Matching priority:
-    1. Exact aria-label match (case-insensitive)
-    2. Partial aria-label match (label is substring of aria-label, or aria-label starts with label)
-    3. ID suffix matching — last segment of element id converted from camelCase to words
+    Scores all aria-labels, element IDs, and element names against the normalized
+    field label tokens. Returns the best match above _MATCH_THRESHOLD.
+
+    Matching signals (checked together, best score wins):
+    - aria-label: most reliable — human-readable, direct label text
+    - element id: structured but semantic (camelCase segments, synonym-expanded)
+    - element name: fallback for elements without id
 
     Returns:
         {'element_id': str|None, 'element_name': str|None, 'element_idx': int|None}
     """
-    label_lower = field_label.lower().strip()
-    result: dict[str, Any] = {"element_id": None, "element_name": None, "element_idx": None}
+    label_tokens = _normalize_tokens(field_label)
 
-    # 1. Exact aria-label match
-    if label_lower in elements["by_aria_label"]:
-        idx = elements["by_aria_label"][label_lower]
-        result["element_idx"] = idx
-        return result
+    best_score = 0.0
+    best_idx: int | None = None
+    best_elem_id: str | None = None
+    best_elem_name: str | None = None
 
-    # 2. Partial aria-label match
+    # 1. Aria-labels (highest signal)
     for aria_label, idx in elements["by_aria_label"].items():
-        if label_lower in aria_label or aria_label.startswith(label_lower):
-            result["element_idx"] = idx
-            return result
+        score = _overlap_score(label_tokens, _normalize_tokens(aria_label))
+        if score > best_score:
+            best_score = score
+            best_idx = idx
+            best_elem_id = None
+            best_elem_name = None
 
-    # 3. ID suffix matching (e.g., "firstName" -> "first name" ~ "First Name")
+    # 2. Element IDs
     for elem_id, idx in elements["by_id"].items():
-        # Take the last segment after '--' (or the full id if no separator)
-        suffix = elem_id.split("--")[-1]
-        words = _camel_to_words(suffix)
-        if label_lower in words or words in label_lower:
-            result["element_id"] = elem_id
-            result["element_idx"] = idx
-            # Also try to find element_name for this element_id
-            # by_name values are the same idx
-            for name, nidx in elements["by_name"].items():
-                if nidx == idx:
-                    result["element_name"] = name
-                    break
-            return result
+        score = _overlap_score(label_tokens, _id_to_tokens(elem_id))
+        if score > best_score:
+            best_score = score
+            best_idx = idx
+            best_elem_id = elem_id
+            best_elem_name = next(
+                (n for n, nidx in elements["by_name"].items() if nidx == idx), None
+            )
 
-    # 4. Name-based matching as last resort (camelCase to words)
+    # 3. Element names (last resort)
     for elem_name, idx in elements["by_name"].items():
-        words = _camel_to_words(elem_name)
-        if label_lower in words or words in label_lower:
-            result["element_name"] = elem_name
-            result["element_idx"] = idx
-            return result
+        score = _overlap_score(label_tokens, _id_to_tokens(elem_name))
+        if score > best_score:
+            best_score = score
+            best_idx = idx
+            best_elem_id = None
+            best_elem_name = elem_name
 
-    return result
+    if best_score < _MATCH_THRESHOLD or best_idx is None:
+        return {"element_id": None, "element_name": None, "element_idx": None}
 
+    return {
+        "element_id": best_elem_id,
+        "element_name": best_elem_name,
+        "element_idx": best_idx,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Fill input builder
+# ---------------------------------------------------------------------------
 
 def build_fill_input(
     resolver_results: list[dict],
@@ -153,7 +257,6 @@ def build_fill_input(
             "element_idx": None,
         }
 
-        # Try to match to DOM element
         match = match_field_to_element(result["label"], widget_type, elements)
         field.update(match)
 

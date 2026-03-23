@@ -4,6 +4,9 @@ from autoapply.services.fill_prep import (
     parse_state_elements,
     match_field_to_element,
     build_fill_input,
+    _normalize_tokens,
+    _id_to_tokens,
+    _overlap_score,
 )
 
 
@@ -285,3 +288,117 @@ def test_build_fill_input_suggest_only_included():
 
     assert len(result["fields"]) == 1
     assert result["fields"][0]["label"] == "Gender"
+
+
+# ---------------------------------------------------------------------------
+# Token helpers
+# ---------------------------------------------------------------------------
+
+def test_normalize_tokens_strips_fillers():
+    """Common filler words are removed."""
+    tokens = _normalize_tokens("How Did You Hear About Us?")
+    assert "how" not in tokens
+    assert "did" not in tokens
+    assert "you" not in tokens
+    assert "hear" in tokens
+
+
+def test_normalize_tokens_extracts_parenthetical():
+    """Content inside parens is kept as tokens."""
+    tokens = _normalize_tokens("Overall Result (GPA)")
+    assert "overall" in tokens
+    assert "result" in tokens
+    assert "gpa" in tokens
+
+
+def test_normalize_tokens_synonym_expansion():
+    """Synonyms are added to token set."""
+    tokens = _normalize_tokens("School or University")
+    # "school" should expand to include "university", "college", etc.
+    assert "school" in tokens
+    assert "university" in tokens
+    assert "college" in tokens
+
+
+def test_id_to_tokens_camelcase():
+    """camelCase id segments are split into tokens."""
+    tokens = _id_to_tokens("education-5--schoolName")
+    assert "education" in tokens
+    assert "school" in tokens
+    assert "name" in tokens
+    assert "5" not in tokens  # numeric segment skipped
+
+
+def test_id_to_tokens_synonym_expansion():
+    """ID tokens are also synonym-expanded."""
+    tokens = _id_to_tokens("education-5--gradeAverage")
+    # "grade" should expand to include "gpa"
+    assert "grade" in tokens
+    assert "gpa" in tokens
+
+
+def test_overlap_score_perfect():
+    a = frozenset({"school", "name"})
+    b = frozenset({"school", "name"})
+    assert _overlap_score(a, b) == 1.0
+
+
+def test_overlap_score_partial():
+    a = frozenset({"school", "university"})
+    b = frozenset({"school", "name"})
+    assert _overlap_score(a, b) == 0.5
+
+
+def test_overlap_score_empty():
+    assert _overlap_score(frozenset(), frozenset({"a"})) == 0.0
+    assert _overlap_score(frozenset({"a"}), frozenset()) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Synonym-based matching
+# ---------------------------------------------------------------------------
+
+def test_match_school_or_university():
+    """'School or University' matches id 'education-5--schoolName' via synonym expansion."""
+    state = "[5057]<input type=text id=education-5--schoolName name=schoolName />"
+    elements = parse_state_elements(state)
+
+    result = match_field_to_element("School or University", "text", elements)
+    assert result["element_idx"] == 5057
+    assert result["element_id"] == "education-5--schoolName"
+
+
+def test_match_overall_result_gpa():
+    """'Overall Result (GPA)' matches id 'education-5--gradeAverage' via synonym expansion."""
+    state = "[5099]<input type=text id=education-5--gradeAverage name=gradeAverage />"
+    elements = parse_state_elements(state)
+
+    result = match_field_to_element("Overall Result (GPA)", "text", elements)
+    assert result["element_idx"] == 5099
+
+
+def test_match_zip_code_to_postal_code():
+    """'Zip Code' matches id containing 'postalCode' via zip<->postal synonym."""
+    state = "[800]<input type=text id=address--postalCode name=postalCode />"
+    elements = parse_state_elements(state)
+
+    result = match_field_to_element("Zip Code", "text", elements)
+    assert result["element_idx"] == 800
+
+
+def test_match_employer_to_company():
+    """'Employer' matches id containing 'company' via synonym."""
+    state = "[900]<input type=text id=workExperience-0--company name=company />"
+    elements = parse_state_elements(state)
+
+    result = match_field_to_element("Employer", "text", elements)
+    assert result["element_idx"] == 900
+
+
+def test_no_match_below_threshold():
+    """Semantically unrelated label returns no match."""
+    state = "[100]<input id=source--source name=source />"
+    elements = parse_state_elements(state)
+
+    result = match_field_to_element("How Did You Hear About Us?", "combobox", elements)
+    assert result["element_idx"] is None

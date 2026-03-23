@@ -80,15 +80,42 @@ Read the output and identify:
 - The Save/Continue button index
 - Any **expandable sections** — buttons or links like "Add Work Experience", "Add Education", "+ Add", "Add another" etc.
 
-**If expandable sections exist, click them all before resolving:**
+**Work Experience — always add ALL entries from profile (regardless of whether required):**
+
+1. Check how many work experience entries are in the profile:
+   ```bash
+   uv run autoapply profile show | grep -A2 "experience"
+   ```
+2. On any page with a Work Experience section, click the "Add Work Experience" (or "+ Add") button **once per profile entry**. If the page already shows one row, click "Add Another" for each additional entry.
+   ```bash
+   uvx browser-use click <add_work_experience_idx>
+   # repeat until total rows = number of profile entries
+   uvx browser-use state > /tmp/page_state.txt && cat /tmp/page_state.txt
+   ```
+3. Fill every entry's fields: Job Title, Company/Employer, Start Date, End Date (or "current"), Location, Description.
+
+**Education — always add ALL entries from profile (regardless of whether required):**
+
+1. Check how many education entries are in the profile:
+   ```bash
+   uv run autoapply profile show | grep -A2 "education"
+   ```
+2. Workday pre-populates one education row. If the profile has more than one entry, click "Add Another Education" for each additional entry.
+   ```bash
+   uvx browser-use click <add_another_education_idx>
+   uvx browser-use state > /tmp/page_state.txt && cat /tmp/page_state.txt
+   ```
+3. Fill every entry's fields: School, Degree, Field of Study, GPA, Start Date, Graduation Date.
+
+**Other expandable sections — click all before resolving:**
 
 ```bash
-uvx browser-use click <add_work_experience_idx>
-# repeat for each "Add" button on the page
+uvx browser-use click <add_section_idx>
+# repeat for each remaining "Add" button on the page
 uvx browser-use state > /tmp/page_state.txt && cat /tmp/page_state.txt
 ```
 
-Re-read state after expanding so the sub-fields (Company, Title, Start Date, etc.) are visible before resolve-batch runs.
+Re-read state after expanding so the sub-fields are visible before resolve-batch runs.
 
 ### 3B: Resolve all fields
 
