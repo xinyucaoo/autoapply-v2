@@ -233,8 +233,8 @@ def test_build_fill_input_skips_null_answers():
     assert "Unknown Field" not in labels
 
 
-def test_build_fill_input_skips_ask_user_policy():
-    """Fields with policy='ask_user' are excluded from output even if answer is present."""
+def test_build_fill_input_includes_ask_user_policy_when_answered():
+    """Fields with policy='ask_user' are included when they have an answer (LLM may have answered them)."""
     resolver = [
         {"label": "First Name", "answer": "Jane", "policy": "autofill",
          "interaction_recipe": None},
@@ -245,7 +245,7 @@ def test_build_fill_input_skips_ask_user_policy():
 
     labels = [f["label"] for f in result["fields"]]
     assert "First Name" in labels
-    assert "Custom Question" not in labels
+    assert "Custom Question" in labels
 
 
 def test_build_fill_input_includes_widget_type():
@@ -276,6 +276,36 @@ def test_build_fill_input_defaults_widget_type_to_text():
 
     assert result["fields"][0]["widget_type"] == "text"
     assert result["fields"][1]["widget_type"] == "text"
+
+
+def test_parse_state_elements_detects_checkboxes():
+    """Checkbox inputs are captured in checkbox_idxs."""
+    state = (
+        "[42]<input type=checkbox id=termsAndConditions--acceptTermsAndAgreements "
+        "name=acceptTermsAndAgreements />\n"
+        "[43]<input type=text id=firstName />\n"
+        "[44]<input type=checkbox id=disability--disabilityStatus name=disabilityStatus />\n"
+    )
+    elements = parse_state_elements(state)
+    assert 42 in elements["checkbox_idxs"]
+    assert 44 in elements["checkbox_idxs"]
+    assert 43 not in elements["checkbox_idxs"]
+
+
+def test_build_fill_input_auto_detects_checkbox_widget_type():
+    """widget_type is overridden to 'checkbox' when matched element is input[type=checkbox]."""
+    state = (
+        "[42]<input type=checkbox id=termsAndConditions--acceptTermsAndAgreements "
+        "aria-label=Accept Terms name=acceptTermsAndAgreements />\n"
+    )
+    resolver = [
+        {"label": "Accept Terms", "answer": "true", "policy": "autofill",
+         "interaction_recipe": {"widget_type": "text"}},  # resolver guessed wrong
+    ]
+    result = build_fill_input(resolver, state, ats="workday")
+    assert len(result["fields"]) == 1
+    assert result["fields"][0]["widget_type"] == "checkbox"
+    assert result["fields"][0]["element_idx"] == 42
 
 
 def test_build_fill_input_suggest_only_included():

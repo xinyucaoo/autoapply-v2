@@ -21,9 +21,40 @@ def get_page():
 
 
 def fill_text(field):
-    """Fill a text/textarea/email input by element index."""
+    """
+    Fill a text/textarea/email input.
+
+    Prefers element ID over numeric index — IDs are stable across Workday
+    page re-renders; numeric indices shift whenever the DOM updates.
+    Falls back to browser.input(idx) when no element_id is available.
+    """
     idx = field.get("element_idx")
     value = field["answer"]
+    element_id = field.get("element_id")
+
+    if element_id:
+        page = get_page()
+        js_value = json.dumps(value)
+        js_id = json.dumps(element_id)
+        result = browser._run(page.evaluate(f"""
+() => {{
+    const el = document.getElementById({js_id});
+    if (!el) return null;
+    const proto = el.tagName === 'TEXTAREA'
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (setter) setter.set.call(el, {js_value});
+    el.dispatchEvent(new Event('input', {{bubbles: true}}));
+    el.dispatchEvent(new Event('change', {{bubbles: true}}));
+    return 'filled:' + el.id;
+}}
+"""))
+        browser.wait(0.15)
+        if result:
+            return "success", None
+        # ID lookup failed (e.g. element in shadow DOM) — fall through to idx
+
     if idx is None:
         return "manual_required", None
     browser.input(idx, value)
@@ -35,49 +66,122 @@ def fill_combobox(field):
     """
     Fill a combobox/autocomplete widget.
 
-    Strategy (type-enter-select):
+    Strategy (type-enter-select with scored matching):
     1. Input the value directly into the field (works through shadow DOM)
     2. Press Enter to trigger search/filter
     3. Wait 1.0s for filtered options to appear
-    4. Find and click matching option via JS (traverses shadow DOM)
-       - Works for multi-level dropdowns: Enter filters across all layers
-    5. Fall back to pressing Enter again if no option visible yet
+    4. Find best matching option via scored JS search (traverses shadow DOM):
+       - Exact match (score 100)
+       - Starts-with match, e.g. "Asian" -> "Asian (Not Hispanic...)" (score 90)
+       - Substring match (score 80)
+       - Token-overlap match, e.g. "Computer Engineering" -> "Computer Science & Engin." (score 30-60)
+    5. If still no match above threshold, return failure (visible in output)
     """
     idx = field.get("element_idx")
     value = field["answer"]
-    if idx is None:
+    element_id = field.get("element_id")
+    if idx is None and element_id is None:
         return "manual_required", None
 
-    browser.input(idx, value)   # fill shadow DOM input directly
-    browser.wait(0.4)
+    page = get_page()
+
+    # Fill input — prefer element ID (shadow-DOM-aware) over numeric index
+    if element_id:
+        js_val = json.dumps(value)
+        js_id = json.dumps(element_id)
+        filled = browser._run(page.evaluate(f"""
+() => {{
+    function findById(root, id) {{
+        const el = root.getElementById ? root.getElementById(id) : root.querySelector('#' + id);
+        if (el) return el;
+        for (const c of root.querySelectorAll('*')) {{
+            if (c.shadowRoot) {{ const r = findById(c.shadowRoot, id); if (r) return r; }}
+        }}
+        return null;
+    }}
+    const el = findById(document, {js_id});
+    if (!el) return null;
+    // Only use React setter on actual input elements (not buttons/divs)
+    if (el.tagName === 'INPUT') {{
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+        if (setter) setter.set.call(el, {js_val});
+        el.dispatchEvent(new Event('input', {{bubbles: true}}));
+        el.dispatchEvent(new Event('change', {{bubbles: true}}));
+        return 'filled:' + el.id;
+    }}
+    return null;  // Not an input — fall through to index-based
+}}
+"""))
+        browser.wait(0.4)
+        if not filled and idx is not None:
+            browser.input(idx, value)   # index fallback
+            browser.wait(0.4)
+        elif not filled:
+            return "manual_required", None
+    else:
+        browser.input(idx, value)   # fill shadow DOM input directly
+        browser.wait(0.4)
+
     browser.keys('Enter')       # trigger filter/search
     browser.wait(1.0)           # wait for filtered options to load
-
-    page = get_page()
     js_value = json.dumps(value.lower())
 
     result = browser._run(page.evaluate(f"""
 () => {{
     const val = {js_value};
-    function findAndClick(root) {{
-        const opts = root.querySelectorAll('[role=option]');
-        for (const o of opts) {{
-            const label = (o.getAttribute('aria-label') || o.textContent || '').toLowerCase().trim();
-            if (label.includes(val)) {{ o.click(); return 'clicked: ' + label; }}
+    // Strip short/stop words for token overlap
+    const STOP = new Set(['the','a','an','of','in','or','and','to','for','is','are','do','at']);
+    const valSet = new Set(val.split(/\\W+/).filter(t => t.length > 1 && !STOP.has(t)));
+
+    function scoreLabel(label) {{
+        const lower = label.toLowerCase().trim();
+        if (!lower) return 0;
+        if (lower === val) return 100;                      // exact
+        if (lower.startsWith(val)) return 90;              // starts-with
+        if (lower.includes(val)) return 80;                // substring
+        // Jaccard token overlap — penalises labels with many extra unmatched tokens
+        // Distinguishes "I AM NOT A VETERAN" (score 45) from
+        // "I IDENTIFY AS A VETERAN, JUST NOT A PROTECTED VETERAN" (score 25)
+        const lblSet = new Set(lower.split(/\\W+/).filter(t => t.length > 1 && !STOP.has(t)));
+        let matches = 0;
+        for (const vt of valSet) {{
+            for (const lt of lblSet) {{
+                if (lt === vt || lt.startsWith(vt) || vt.startsWith(lt)) {{ matches++; break; }}
+            }}
         }}
-        for (const el of root.querySelectorAll('*')) {{
-            if (el.shadowRoot) {{ const r = findAndClick(el.shadowRoot); if (r) return r; }}
-        }}
-        return null;
+        const unionSize = valSet.size + lblSet.size - matches;
+        return unionSize > 0 ? (matches / unionSize) * 60 : 0;
     }}
-    return findAndClick(document);
+
+    function collectOptions(root, out) {{
+        root.querySelectorAll('[role=option], li[role=option]').forEach(o => out.push(o));
+        root.querySelectorAll('*').forEach(el => {{
+            if (el.shadowRoot) collectOptions(el.shadowRoot, out);
+        }});
+    }}
+
+    const allOpts = [];
+    collectOptions(document, allOpts);
+
+    let bestOpt = null, bestScore = 0;
+    for (const o of allOpts) {{
+        const label = (o.getAttribute('aria-label') || o.textContent || '').trim();
+        const s = scoreLabel(label);
+        if (s > bestScore) {{ bestScore = s; bestOpt = o; }}
+    }}
+
+    const THRESHOLD = 30;
+    if (bestOpt && bestScore >= THRESHOLD) {{
+        bestOpt.click();
+        return 'clicked(score=' + Math.round(bestScore) + '): ' + (bestOpt.getAttribute('aria-label') || bestOpt.textContent).trim().slice(0, 60);
+    }}
+    return null;
 }}
 """))
 
-    if result is None:
-        browser.keys('Enter')  # fallback: Enter may have already selected top match
-
     browser.wait(0.3)
+    if result is None:
+        return "failure", f"No matching option found for {value!r}"
     return "success", None
 
 

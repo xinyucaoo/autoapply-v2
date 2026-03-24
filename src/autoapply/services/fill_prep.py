@@ -127,12 +127,16 @@ def parse_state_elements(state_text: str) -> dict:
     by_id: dict[str, int] = {}
     by_name: dict[str, int] = {}
     by_aria_label: dict[str, int] = {}
+    checkbox_idxs: set[int] = set()
 
     for line in state_text.split("\n"):
         idx_match = re.search(r"\[(\d+)\]", line)
         if not idx_match:
             continue
         idx = int(idx_match.group(1))
+
+        if re.search(r"\btype=checkbox\b", line):
+            checkbox_idxs.add(idx)
 
         id_match = re.search(r"\bid=([^\s/>]+)", line)
         if id_match:
@@ -147,7 +151,7 @@ def parse_state_elements(state_text: str) -> dict:
         if aria_match:
             by_aria_label[aria_match.group(1).strip().lower()] = idx
 
-    return {"by_id": by_id, "by_name": by_name, "by_aria_label": by_aria_label}
+    return {"by_id": by_id, "by_name": by_name, "by_aria_label": by_aria_label, "checkbox_idxs": checkbox_idxs}
 
 
 # ---------------------------------------------------------------------------
@@ -242,8 +246,6 @@ def build_fill_input(
     for result in resolver_results:
         if result.get("answer") is None:
             continue
-        if result.get("policy") == "ask_user":
-            continue
 
         recipe = result.get("interaction_recipe") or {}
         widget_type = recipe.get("widget_type", "text")
@@ -260,10 +262,19 @@ def build_fill_input(
         match = match_field_to_element(result["label"], widget_type, elements)
         field.update(match)
 
+        # Auto-detect checkboxes: if the matched element is input[type=checkbox],
+        # override widget_type regardless of what the resolver guessed.
+        matched_idx = field.get("element_idx")
+        if matched_idx is not None and matched_idx in elements.get("checkbox_idxs", ()):
+            field["widget_type"] = "checkbox"
+
         fields.append(field)
+
+    # Convert checkbox_idxs set to list for JSON serialization
+    serializable_elements = {**elements, "checkbox_idxs": list(elements["checkbox_idxs"])}
 
     return {
         "fields": fields,
-        "element_map": elements,
+        "element_map": serializable_elements,
         "ats_platform": ats,
     }

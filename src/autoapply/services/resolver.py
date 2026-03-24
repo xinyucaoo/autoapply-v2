@@ -252,6 +252,53 @@ def _normalize(label: str) -> str:
     return label
 
 
+# ---------------------------------------------------------------------------
+# Token-overlap fallback for canonical map
+# ---------------------------------------------------------------------------
+
+# Stop words removed before token overlap scoring (same set as fill_prep)
+_RESOLVER_STOP = frozenset({
+    "select", "one", "please", "enter", "your", "the", "a", "an",
+    "or", "and", "is", "of", "in", "at", "for", "how", "did",
+    "you", "us", "have", "will", "are", "do", "does", "was", "were",
+    "what", "which", "this", "that", "with", "about", "to",
+})
+
+
+def _res_tokens(s: str) -> frozenset[str]:
+    """Tokenize a normalized label string for canonical map scoring."""
+    return frozenset(t for t in s.split() if t and t not in _RESOLVER_STOP and not t.isdigit())
+
+
+# Pre-tokenized canonical entries sorted longest-first so the most-specific
+# match wins when multiple canonical keys are subsets of the input tokens.
+_CANONICAL_ENTRIES: list[tuple[frozenset[str], str]] = sorted(
+    [(_res_tokens(_normalize(k)), v) for k, v in CANONICAL_MAP.items()],
+    key=lambda x: len(x[0]),
+    reverse=True,
+)
+
+
+def _canonical_token_match(normalized_label: str) -> str | None:
+    """
+    Token-subset fallback: return a profile_path if ALL tokens of a canonical key
+    are present in the label's token set (ignoring stop words).
+
+    Picks the most specific (longest) matching canonical key first.
+    Examples:
+      "What is your ethnicity? (Select all that apply)" -> "eeo.race_ethnicity"
+      "Will you now or in the future require sponsorship for employment visa status?" ->
+          "work_authorization.sponsorship_needed"
+    """
+    label_tokens = _res_tokens(normalized_label)
+    if not label_tokens:
+        return None
+    for key_tokens, profile_path in _CANONICAL_ENTRIES:
+        if key_tokens and key_tokens <= label_tokens:   # subset check
+            return profile_path
+    return None
+
+
 def _get_profile_value(profile: Profile, path: str) -> Any:
     """Get a value from profile by dot-path. Returns None if not found."""
     if path.startswith("__computed__"):
@@ -301,12 +348,44 @@ def _get_policy(path: str, profile: Profile) -> str:
 @dataclass
 class ResolveResult:
     answer: Any | None
-    source: str | None      # "profile", "history", "custom_qa", None
+    source: str | None      # "profile", "history", "custom_qa", "llm_infer", None
     profile_path: str | None
-    confidence: str | None  # "high", "medium", None
+    confidence: str | None  # "high", "medium", "low", None
     policy: str             # "autofill", "suggest_only", "always_prompt", "never_store"
     suggestion: str | None  # Human-readable suggestion text
+    needs_review: bool = False  # True = flag this field in pre-submission review
     interaction_recipe: dict | None = None  # Serialized InteractionRecipe, if known
+
+
+def _llm_infer(label: str, profile: Profile, options: list[str] | None = None) -> str | None:
+    """Call Claude to infer an answer from the profile when deterministic lookup fails."""
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+        profile_json = profile.model_dump_json(indent=2)
+        options_text = f"\nAvailable options: {options}" if options else ""
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=256,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"You are filling out a job application form. Based on the applicant's profile, "
+                    f"answer this form field.\n\nProfile:\n{profile_json}\n\n"
+                    f'Form field: "{label}"{options_text}\n\n'
+                    f"Rules:\n"
+                    f"- Answer with ONLY the value to fill in (no explanation)\n"
+                    f"- If a list of options is provided, pick the best matching option exactly as written\n"
+                    f"- For yes/no questions about work history, check the experience[] array\n"
+                    f"- If you truly cannot determine the answer, reply with exactly: UNKNOWN\n"
+                    f"- Keep answers concise and appropriate for a form field"
+                ),
+            }],
+        )
+        answer = message.content[0].text.strip()
+        return None if answer == "UNKNOWN" or not answer else answer
+    except Exception:
+        return None
 
 
 def resolve_batch(
@@ -362,6 +441,7 @@ def resolve_batch(
             "profile_path": result.profile_path,
             "confidence": result.confidence,
             "policy": result.policy,
+            "needs_review": result.needs_review,
             "suggestion": result.suggestion,
             "interaction_recipe": result.interaction_recipe,
         })
@@ -401,7 +481,7 @@ def resolve(
         playbook = lookup_playbook(ats_platform, field_type)
         return playbook.model_dump() if playbook else None
 
-    # Step 1 & 2: Canonical + alias mapping
+    # Step 1 & 2: Canonical mapping — exact match first
     profile_path = CANONICAL_MAP.get(normalized)
     if profile_path:
         value = _get_profile_value(profile, profile_path)
@@ -413,6 +493,7 @@ def resolve(
             else:
                 value = str(value) if not isinstance(value, str) else value
 
+            needs_review = policy in ("always_prompt", "suggest_only")
             suggestion = f"{value} (from profile: {profile_path})"
             return ResolveResult(
                 answer=value,
@@ -420,11 +501,12 @@ def resolve(
                 profile_path=profile_path,
                 confidence="high",
                 policy=policy,
-                suggestion=suggestion if policy != "autofill" else None,
+                needs_review=needs_review,
+                suggestion=suggestion if needs_review else None,
                 interaction_recipe=_recipe(),
             )
 
-    # Step 3: Custom Q&A in profile
+    # Step 3: Custom Q&A in profile (before token-overlap so explicit answers beat fuzzy matching)
     for qa in profile.custom_qa:
         if _normalize(qa.question) in normalized or normalized in _normalize(qa.question):
             policy = qa.policy or "autofill"
@@ -434,7 +516,33 @@ def resolve(
                 profile_path=None,
                 confidence="high",
                 policy=policy,
+                needs_review=policy in ("always_prompt", "suggest_only"),
                 suggestion=f"{qa.answer} (from custom Q&A)",
+                interaction_recipe=_recipe(),
+            )
+
+    # Step 3b: Canonical token-overlap fallback — handles verbose labels like
+    #   "What is your ethnicity? (Select all that apply)" -> eeo.race_ethnicity
+    #   "Will you now or in the future require sponsorship...?" -> work_authorization.sponsorship_needed
+    # Placed after custom_qa so explicit answers take precedence over fuzzy canonical matching.
+    token_path = _canonical_token_match(normalized)
+    if token_path:
+        value = _get_profile_value(profile, token_path)
+        policy = _get_policy(token_path, profile)
+        if value is not None:
+            if isinstance(value, bool):
+                value = "Yes" if value else "No"
+            else:
+                value = str(value) if not isinstance(value, str) else value
+            needs_review = policy in ("always_prompt", "suggest_only")
+            return ResolveResult(
+                answer=value,
+                source="profile",
+                profile_path=token_path,
+                confidence="high",
+                policy=policy,
+                needs_review=needs_review,
+                suggestion=f"{value} (from profile: {token_path})" if needs_review else None,
                 interaction_recipe=_recipe(),
             )
 
@@ -446,18 +554,34 @@ def resolve(
             source="history",
             profile_path=qa_match.normalized_key,
             confidence="medium",
-            policy="suggest_only",  # History matches are always suggestions
+            policy="autofill",
+            needs_review=True,
             suggestion=f"{qa_match.answer} (from previous application)",
             interaction_recipe=_recipe(qa_match),
         )
 
-    # No match
+    # Step 5: LLM inference — use Claude to reason from profile context
+    inferred = _llm_infer(label, profile, options)
+    if inferred is not None:
+        return ResolveResult(
+            answer=inferred,
+            source="llm_infer",
+            profile_path=None,
+            confidence="low",
+            policy="autofill",
+            needs_review=True,
+            suggestion=f"{inferred} (AI-inferred — please review)",
+            interaction_recipe=_recipe(),
+        )
+
+    # No answer found (very rare — LLM should handle most cases)
     return ResolveResult(
         answer=None,
         source=None,
         profile_path=profile_path,
         confidence=None,
         policy="ask_user",
+        needs_review=True,
         suggestion=None,
         interaction_recipe=_recipe(),
     )

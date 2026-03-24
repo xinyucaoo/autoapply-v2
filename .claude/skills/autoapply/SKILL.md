@@ -125,13 +125,7 @@ Build a JSON array of all visible fields with their labels and widget types, the
 uv run autoapply resolve-batch --ats <ats> --company "<company>" --fields '<fields_json>' > /tmp/resolver_output.json
 ```
 
-### 3C: Collect user input for PROMPT fields
-
-Read `/tmp/resolver_output.json`. For fields with `policy: "suggest_only"`, `"always_prompt"`, or `"ask_user"`, ask the user in a single batch message before proceeding.
-
-After receiving answers, update the resolver output JSON with the user's answers.
-
-### 3D: Build fill engine input + fill all fields
+### 3C: Build fill engine input + fill all fields
 
 ```bash
 # Build fill engine input (auto-maps labels to DOM elements)
@@ -148,7 +142,7 @@ uvx browser-use python --file scripts/fill_engine.py
 cat /tmp/autoapply_fill_output.json
 ```
 
-### 3E: Handle failures and special fields
+### 3D: Handle failures and special fields
 
 Read the fill output. For any `"status": "failure"`, `"error"`, or `"manual_required"` fields:
 - **Radio buttons**: Use JS via `uvx browser-use eval` to find and click the correct radio
@@ -157,7 +151,7 @@ Read the fill output. For any `"status": "failure"`, `"error"`, or `"manual_requ
 
 **Note:** Fields auto-matched by `fill-prep` but with wrong mapping will show as failures. Re-check the state text and manually fill those fields.
 
-### 3F: Pre-navigation validation
+### 3E: Pre-navigation validation
 
 Before clicking Save/Continue:
 1. Check fill output for any failures
@@ -171,33 +165,35 @@ Before clicking Save/Continue:
 
 ## Step 4: Pre-Submission Review
 
-Before clicking Submit, compile a summary table and present to user:
+Before clicking Submit, read `/tmp/resolver_output.json` and compile a summary. Split fields into two sections based on `needs_review`:
 
 ```
 Ready to submit your application to Acme Corp — Senior Engineer.
 
-PERSONAL
+AUTO-FILLED (from your profile)
   First Name:           Jane
   Last Name:            Doe
   Email:                jane@example.com
   Phone:                555-123-4567
-
-WORK AUTHORIZATION
   Authorized (US):      Yes
   Sponsorship needed:   No
-
-EDUCATION
   School:               MIT | Degree: Bachelor of Science | GPA: 3.8
 
-CUSTOM / USER-PROVIDED
-  Why interested:       I'm passionate about distributed systems.
-  Expected salary:      180000 (you confirmed)
-  Gender:               Female (you confirmed)
+NEEDS YOUR REVIEW (AI-inferred or flagged)
+  Expected salary:      $180,000        [from profile — always_prompt]
+  Start date:           2025-06-01      [from profile — always_prompt]
+  Why interested:       I'm passionate about distributed systems.  [AI-inferred]
+  Have you worked here: No              [AI-inferred from experience history]
+  Willing to relocate:  Yes             [from profile — suggest_only]
 
-Shall I submit? (yes / no / edit <field>)
+Any corrections? (type "edit <field> <new value>", or "submit" to proceed)
 ```
 
-Wait for "yes" before clicking Submit.
+- `needs_review: true` fields are those with `source: "llm_infer"`, `policy: "always_prompt"`, `policy: "suggest_only"`, or `source: "history"`.
+- Show the source/reason in brackets so the user knows why it's flagged.
+- Accept corrections inline before submitting.
+
+Wait for "submit" (or equivalent confirmation) before clicking Submit.
 
 ---
 

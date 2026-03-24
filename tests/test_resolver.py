@@ -313,7 +313,8 @@ def test_resolve_history_fallback(sample_profile, sample_history):
     )
     assert r.source == "history"
     assert r.confidence == "medium"
-    assert r.policy == "suggest_only"
+    assert r.policy == "autofill"
+    assert r.needs_review is True
     assert r.answer is not None
 
 
@@ -448,6 +449,46 @@ def test_resolve_extra_whitespace(sample_profile):
     """Labels with extra whitespace are handled."""
     r = resolve("  phone  number  ", profile=sample_profile, history=empty_history())
     assert r.answer == "555-123-4567"
+
+
+# ---------------------------------------------------------------------------
+# Token-overlap canonical matching (verbose Workday labels)
+# ---------------------------------------------------------------------------
+
+def test_resolve_verbose_ethnicity_label(sample_profile):
+    """'What is your ethnicity? (Select all that apply)' resolves via token overlap."""
+    r = resolve("What is your ethnicity? (Select all that apply)",
+                profile=sample_profile, history=empty_history())
+    assert r.profile_path == "eeo.race_ethnicity"
+    assert r.source == "profile"
+
+
+def test_resolve_verbose_sponsorship_label(sample_profile):
+    """'Will you now or in the future require sponsorship for employment visa status?' resolves."""
+    r = resolve(
+        "Will you now or in the future require sponsorship for employment visa status (United States)?",
+        profile=sample_profile, history=empty_history(),
+    )
+    assert r.profile_path == "work_authorization.sponsorship_needed"
+    assert r.source == "profile"
+
+
+def test_resolve_verbose_gender_label(sample_profile):
+    """'What is your gender?' resolves via token overlap."""
+    r = resolve("What is your gender?", profile=sample_profile, history=empty_history())
+    assert r.profile_path == "eeo.gender"
+
+
+def test_resolve_verbose_disability_label(sample_profile):
+    """'Do you have a disability?' resolves via token overlap."""
+    r = resolve("Do you have a disability?", profile=sample_profile, history=empty_history())
+    assert r.profile_path == "eeo.disability_status"
+
+
+def test_resolve_verbose_veteran_label(sample_profile):
+    """'Are you a veteran?' resolves via token overlap."""
+    r = resolve("Are you a veteran?", profile=sample_profile, history=empty_history())
+    assert r.profile_path == "eeo.veteran_status"
 
 
 # ---------------------------------------------------------------------------
